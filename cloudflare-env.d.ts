@@ -27,6 +27,7 @@ declare module "cloudflare:workers" {
     DB?: D1Database;
     GITHUB_TOKEN?: string;
     GITHUB_OWNER?: string;
+    ARCHIC_PUBLISH_KEY?: string;
     [key: string]: unknown;
   };
 }

@@ -50,68 +50,22 @@ import {
   type BusinessBrief,
   type LegalProfile,
 } from "../lib/site-generator";
+import {
+  applyLocalStudioAction,
+  LOCAL_STUDIO_STORAGE_VERSION,
+  parseLocalStudioData,
+  type StudioActionBody,
+  type StudioClient as Client,
+  type StudioData,
+  type StudioProject as Project,
+} from "../lib/studio-local";
 
-type Client = {
-  id: string;
-  name: string;
-  legalName: string;
-  taxId: string;
-  email: string;
-  phone: string;
-  address: string;
-  city: string;
-  country: string;
-  sector: string;
-  registryData: string;
-  professionalData: string;
-  status: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type Project = {
-  id: string;
-  clientId: string;
-  name: string;
-  slug: string;
-  siteType: string;
-  template: string;
-  primaryColor: string;
-  accentColor: string;
-  headline: string;
-  subheadline: string;
-  heroImageUrl: string;
-  sections: string[];
-  integrations: string[];
-  legal: Record<string, boolean>;
-  brief: BusinessBrief;
-  legalProfile: LegalProfile;
-  status: string;
-  complianceScore: number;
-  githubRepoFullName: string;
-  githubRepoUrl: string;
-  githubDefaultBranch: string;
-  githubLastPushAt: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type Audit = {
-  id: string;
-  projectId: string;
-  title: string;
-  detail: string;
-  severity: string;
-  status: string;
-  createdAt: string;
-};
-
-type StudioData = { clients: Client[]; projects: Project[]; audits: Audit[] };
 type Tab = "dashboard" | "projects" | "clients" | "compliance" | "templates" | "settings";
 
 type ProjectDraft = Omit<Project, "id" | "complianceScore" | "createdAt" | "updatedAt"> & { id?: string };
-type StudioPayload = StudioData & { savedProjectId?: string };
-type GithubStatus = { connected: boolean; owner?: string; user?: { login: string; name?: string; avatar_url?: string; html_url: string }; reason?: string; error?: string };
+type PublicationMetadata = Pick<Project, "githubRepoFullName" | "githubRepoUrl" | "githubDefaultBranch" | "githubLastPushAt">;
+type StudioPayload = StudioData & { savedProjectId?: string; storageMode?: "browser" | "server" };
+type GithubStatus = { connected: boolean; owner?: string; user?: { login: string; name?: string; avatar_url?: string; html_url: string }; reason?: string; error?: string; requiresPublishKey?: boolean };
 
 const EMPTY_DATA: StudioData = { clients: [], projects: [], audits: [] };
 
@@ -276,6 +230,7 @@ function EmptyState({ title, text, action }: { title: string; text: string; acti
 
 export default function StudioApp({ user }: { user: { email: string; name: string } }) {
   const [data, setData] = useState<StudioData>(EMPTY_DATA);
+  const [storageMode, setStorageMode] = useState<"browser" | "server">("server");
   const [tab, setTab] = useState<Tab>("dashboard");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -285,14 +240,30 @@ export default function StudioApp({ user }: { user: { email: string; name: strin
   const [clientModal, setClientModal] = useState<{ open: boolean; client?: Client }>({ open: false });
   const [mobileNav, setMobileNav] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const storageKey = `${LOCAL_STUDIO_STORAGE_VERSION}:${user.email.toLowerCase()}`;
 
   useEffect(() => {
     let active = true;
     void fetch("/api/studio", { cache: "no-store" })
       .then(async (response) => {
-        const payload = await response.json();
+        const payload = await response.json() as StudioPayload & { error?: string };
         if (!response.ok) throw new Error(payload.error || "No se pudo cargar el estudio.");
-        if (active) setData(payload);
+        if (!active) return;
+        const remoteData: StudioData = {
+          clients: payload.clients,
+          projects: payload.projects,
+          audits: payload.audits,
+        };
+        if (payload.storageMode === "browser") {
+          const stored = parseLocalStudioData(window.localStorage.getItem(storageKey));
+          const nextData = stored ?? remoteData;
+          if (!stored) window.localStorage.setItem(storageKey, JSON.stringify(nextData));
+          setStorageMode("browser");
+          setData(nextData);
+        } else {
+          setStorageMode("server");
+          setData(remoteData);
+        }
       })
       .catch((caught) => {
         if (active) setError(caught instanceof Error ? caught.message : "No se pudo cargar el estudio.");
@@ -301,7 +272,7 @@ export default function StudioApp({ user }: { user: { email: string; name: strin
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, []);
+  }, [storageKey]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -319,10 +290,21 @@ export default function StudioApp({ user }: { user: { email: string; name: strin
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
-  const action = async (body: unknown) => {
+  const action = async (body: StudioActionBody) => {
     setSaving(true);
     setError("");
     try {
+      if (storageMode === "browser") {
+        const payload = applyLocalStudioAction(data, body);
+        const nextData: StudioData = {
+          clients: payload.clients,
+          projects: payload.projects,
+          audits: payload.audits,
+        };
+        window.localStorage.setItem(storageKey, JSON.stringify(nextData));
+        setData(nextData);
+        return payload;
+      }
       const response = await fetch("/api/studio", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const payload = await response.json() as StudioPayload & { error?: string };
       if (!response.ok) throw new Error(payload.error || "No se pudo guardar el cambio.");
@@ -403,13 +385,13 @@ export default function StudioApp({ user }: { user: { email: string; name: strin
               {tab === "clients" ? <ClientsView clients={filteredClients} projects={data.projects} onNew={() => setClientModal({ open: true })} onEdit={(client) => setClientModal({ open: true, client })} /> : null}
               {tab === "compliance" ? <ComplianceView data={data} averageScore={averageScore} saving={saving} onAudit={(id) => void action({ action: "runAudit", id })} onOpen={openProject} /> : null}
               {tab === "templates" ? <TemplatesView onUse={(template) => { const project = { ...DEFAULT_DRAFT, template, primaryColor: TEMPLATES.find((item) => item.id === template)?.colors[0] || DEFAULT_DRAFT.primaryColor, accentColor: TEMPLATES.find((item) => item.id === template)?.colors[2] || DEFAULT_DRAFT.accentColor }; setProjectModal({ open: true, project: project as Project }); }} /> : null}
-              {tab === "settings" ? <SettingsView /> : null}
+              {tab === "settings" ? <SettingsView storageMode={storageMode} /> : null}
             </>
           )}
         </main>
       </div>
 
-      {projectModal.open ? <ProjectWizard clients={data.clients} project={projectModal.project} saving={saving} onClose={() => setProjectModal({ open: false })} onSave={async (project) => { const payload = await action({ action: project.id ? "updateProject" : "createProject", project }); if (!payload) return undefined; return payload.projects.find((item) => item.id === project.id || item.id === payload.savedProjectId); }} /> : null}
+      {projectModal.open ? <ProjectWizard clients={data.clients} project={projectModal.project} saving={saving} storageMode={storageMode} onClose={() => setProjectModal({ open: false })} onSave={async (project) => { const payload = await action({ action: project.id ? "updateProject" : "createProject", project }); if (!payload) return undefined; return payload.projects.find((item) => item.id === project.id || item.id === payload.savedProjectId); }} /> : null}
       {clientModal.open ? <ClientModal client={clientModal.client} saving={saving} onClose={() => setClientModal({ open: false })} onSave={async (client) => { const ok = await action({ action: client.id ? "updateClient" : "createClient", client }); if (ok) setClientModal({ open: false }); }} /> : null}
     </div>
   );
@@ -493,11 +475,11 @@ function useGithubStatus() {
 
 function GithubSettingsCard() {
   const { status, loading, refresh } = useGithubStatus();
-  return <section className="panel settings-section github-settings"><div className="settings-title"><Github /><div><h2>GitHub</h2><p>Repositorios privados y publicación directa desde cada proyecto.</p></div><span className={`connection-pill ${status?.connected ? "connected" : ""}`}><i />{loading ? "Comprobando" : status?.connected ? "Conectado" : "Pendiente"}</span></div>{status?.connected ? <div className="github-account"><span>{status.user?.login.slice(0, 2).toUpperCase()}</span><div><strong>{status.user?.name || status.user?.login}</strong><p>Los nuevos repositorios se crearán en <b>{status.owner}</b> y el token nunca se envía al navegador.</p></div><a href={status.user?.html_url} target="_blank" rel="noreferrer">Abrir perfil <ArrowUpRight /></a></div> : <div className="github-empty"><div><strong>Conecta una credencial de publicación segura</strong><p>Añade <code>GITHUB_TOKEN</code> y <code>GITHUB_OWNER</code> como secretos del entorno. El token debe poder crear repositorios y escribir su contenido.</p></div><button className="secondary-button" onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} />Volver a comprobar</button></div>}</section>;
+  return <section className="panel settings-section github-settings"><div className="settings-title"><Github /><div><h2>GitHub</h2><p>Repositorios privados y publicación directa desde cada proyecto.</p></div><span className={`connection-pill ${status?.connected ? "connected" : ""}`}><i />{loading ? "Comprobando" : status?.connected ? "Conectado" : "Pendiente"}</span></div>{status?.connected ? <div className="github-account"><span>{status.user?.login.slice(0, 2).toUpperCase()}</span><div><strong>{status.user?.name || status.user?.login}</strong><p>Los nuevos repositorios se crearán en <b>{status.owner}</b> y el token nunca se envía al navegador.</p></div><a href={status.user?.html_url} target="_blank" rel="noreferrer">Abrir perfil <ArrowUpRight /></a></div> : <div className="github-empty"><div><strong>Conecta una credencial de publicación segura</strong><p>Añade <code>GITHUB_TOKEN</code> y <code>GITHUB_OWNER</code> como secretos. En Vercel añade también <code>ARCHIC_PUBLISH_KEY</code> para impedir publicaciones anónimas.</p></div><button className="secondary-button" onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} />Volver a comprobar</button></div>}</section>;
 }
 
-function SettingsView() {
-  return <div className="page"><div className="page-heading"><div><p className="overline">Configuración</p><h1>Ajustes</h1><p>Guardas internas aplicadas a todos los nuevos proyectos.</p></div></div><div className="settings-layout"><GithubSettingsCard /><section className="panel settings-section"><div className="settings-title"><ShieldCheck /><div><h2>Reglas de publicación</h2><p>Bloqueos que evitan publicar una base incompleta.</p></div></div>{["Exigir datos legales del titular", "Bloquear scripts antes del consentimiento", "Incluir rechazo visible de cookies", "Exigir capa informativa en formularios", "Ejecutar revisión de accesibilidad"].map((item) => <label className="setting-row" key={item}><span>{item}</span><input type="checkbox" defaultChecked /><i /></label>)}</section><section className="panel settings-section"><div className="settings-title"><Code2 /><div><h2>Exportación</h2><p>Valores comunes en los proyectos generados.</p></div></div><label className="field"><span>Nombre de la organización</span><input defaultValue="Archic" /></label><label className="field"><span>Dominio de trabajo</span><input defaultValue="archic.es" /></label><label className="field"><span>Firma del generador</span><select defaultValue="hidden"><option value="hidden">No mostrar</option><option value="footer">Mostrar en el pie</option></select></label><button className="primary-button"><Save size={17} />Guardar ajustes</button></section></div>
+function SettingsView({ storageMode }: { storageMode: "browser" | "server" }) {
+  return <div className="page"><div className="page-heading"><div><p className="overline">Configuración</p><h1>Ajustes</h1><p>Guardas internas aplicadas a todos los nuevos proyectos.</p></div></div><div className="settings-layout"><GithubSettingsCard /><section className="panel settings-section"><div className="settings-title"><LockKeyhole /><div><h2>Datos del Studio</h2><p>{storageMode === "browser" ? "Persistencia privada de este navegador." : "Persistencia central en Cloudflare D1."}</p></div><span className="connection-pill connected"><i />{storageMode === "browser" ? "Local" : "D1"}</span></div><div className="github-empty"><div><strong>{storageMode === "browser" ? "Sincronización limitada a este dispositivo" : "Espacio de trabajo compartido"}</strong><p>{storageMode === "browser" ? "Clientes, proyectos y auditorías se guardan en el almacenamiento local del navegador. No se sincronizan entre navegadores; descarga la configuración antes de borrar sus datos." : "Los cambios se guardan en la base vinculada al entorno y permanecen disponibles en las siguientes sesiones."}</p></div></div></section><section className="panel settings-section"><div className="settings-title"><ShieldCheck /><div><h2>Reglas de publicación</h2><p>Bloqueos que evitan publicar una base incompleta.</p></div></div>{["Exigir datos legales del titular", "Bloquear scripts antes del consentimiento", "Incluir rechazo visible de cookies", "Exigir capa informativa en formularios", "Ejecutar revisión de accesibilidad"].map((item) => <label className="setting-row" key={item}><span>{item}</span><input type="checkbox" defaultChecked /><i /></label>)}</section><section className="panel settings-section"><div className="settings-title"><Code2 /><div><h2>Exportación</h2><p>Valores comunes en los proyectos generados.</p></div></div><label className="field"><span>Nombre de la organización</span><input defaultValue="Archic" /></label><label className="field"><span>Dominio de trabajo</span><input defaultValue="archic.es" /></label><label className="field"><span>Firma del generador</span><select defaultValue="hidden"><option value="hidden">No mostrar</option><option value="footer">Mostrar en el pie</option></select></label><button className="primary-button"><Save size={17} />Guardar ajustes</button></section></div>
     <div className="legal-disclaimer"><AlertTriangle /><div><strong>Revisión profesional para casos de riesgo</strong><p>Archic Studio marca como revisión obligatoria los proyectos de salud, menores, datos sensibles, perfilado o decisiones automatizadas. La herramienta acelera y documenta el trabajo; no sustituye el análisis jurídico específico cuando el tratamiento lo exige.</p></div></div>
   </div>;
 }
@@ -521,7 +503,7 @@ function ClientModal({ client: existingClient, saving, onClose, onSave }: { clie
   return <div className="modal-backdrop" role="presentation"><section className="modal-card client-modal" role="dialog" aria-modal="true" aria-labelledby="client-title"><div className="modal-header"><div><p className="overline">Ficha reutilizable</p><h2 id="client-title">{existingClient ? "Editar cliente" : "Añadir cliente"}</h2></div><button onClick={onClose} aria-label="Cerrar"><X /></button></div><div className="form-grid"><label className="field"><span>Nombre comercial *</span><input autoFocus value={client.name} onChange={(event) => update("name", event.target.value)} placeholder="Ej. Sillas Juan y Lola" /></label><label className="field"><span>Sector</span><input value={client.sector} onChange={(event) => update("sector", event.target.value)} /></label><label className="field"><span>Razón social</span><input value={client.legalName} onChange={(event) => update("legalName", event.target.value)} /></label><label className="field"><span>NIF / CIF</span><input value={client.taxId} onChange={(event) => update("taxId", event.target.value)} /></label><label className="field"><span>Correo de contacto y privacidad</span><input type="email" value={client.email} onChange={(event) => update("email", event.target.value)} /></label><label className="field"><span>Teléfono</span><input value={client.phone} onChange={(event) => update("phone", event.target.value)} /></label><label className="field wide"><span>Dirección completa</span><input value={client.address} onChange={(event) => update("address", event.target.value)} /></label><label className="field"><span>Ciudad</span><input value={client.city} onChange={(event) => update("city", event.target.value)} /></label><label className="field"><span>País</span><input value={client.country} onChange={(event) => update("country", event.target.value)} /></label><label className="field wide"><span>Datos registrales · si aplica</span><textarea rows={2} value={client.registryData} onChange={(event) => update("registryData", event.target.value)} placeholder="Registro, tomo, folio, hoja e inscripción" /></label><label className="field wide"><span>Profesión regulada o autorización · si aplica</span><textarea rows={2} value={client.professionalData} onChange={(event) => update("professionalData", event.target.value)} placeholder="Colegio, número, título, autoridad o licencia" /></label></div><div className="modal-footer"><button className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={!client.name.trim() || saving} onClick={() => onSave(client)}>{saving ? <Loader2 className="spin" /> : <Save />}Guardar ficha</button></div></section></div>;
 }
 
-function ProjectWizard({ clients, project, saving, onClose, onSave }: { clients: Client[]; project?: Project; saving: boolean; onClose: () => void; onSave: (project: ProjectDraft) => Promise<Project | undefined> }) {
+function ProjectWizard({ clients, project, saving, storageMode, onClose, onSave }: { clients: Client[]; project?: Project; saving: boolean; storageMode: "browser" | "server"; onClose: () => void; onSave: (project: ProjectDraft) => Promise<Project | undefined> }) {
   const [step, setStep] = useState(1);
   const [draft, setDraft] = useState<ProjectDraft>(() => {
     if (project?.id) return { ...project, brief: { ...project.brief, services: [...(project.brief?.services ?? [])], differentiators: [...(project.brief?.differentiators ?? [])], proofPoints: [...(project.brief?.proofPoints ?? [])], seoKeywords: [...(project.brief?.seoKeywords ?? [])] }, legalProfile: { ...project.legalProfile }, legal: { ...project.legal }, sections: [...project.sections], integrations: [...project.integrations] };
@@ -554,7 +536,7 @@ function ProjectWizard({ clients, project, saving, onClose, onSave }: { clients:
         {step === 3 ? <WizardDesign draft={draft} update={update} toggleSection={(value) => toggleArray("sections", value)} /> : null}
         {step === 4 ? <WizardIntegrations draft={draft} toggle={(value) => toggleArray("integrations", value)} /> : null}
         {step === 5 ? <WizardLegal draft={draft} client={client} toggle={toggleLegal} update={updateLegalProfile} assessment={assessment} /> : null}
-        {step === 6 ? <WizardPreview draft={draft} client={client} html={html} device={device} setDevice={setDevice} assessment={assessment} /> : null}
+        {step === 6 ? <WizardPreview draft={draft} client={client} html={html} device={device} setDevice={setDevice} assessment={assessment} storageMode={storageMode} onPublished={async (publication) => { const result = await onSave({ ...draft, ...publication }); if (result) { setDraft({ ...result }); setSaved(true); } }} /> : null}
       </div>
       <footer className="wizard-footer"><div>{step > 1 ? <button className="secondary-button" onClick={() => setStep((current) => current - 1)}>Anterior</button> : <span />}</div><div><span>{saved ? "Proyecto guardado" : `Paso ${step} de ${steps.length}`}</span>{step < steps.length ? <button className="primary-button" disabled={nextDisabled} onClick={() => setStep((current) => current + 1)}>Continuar <ChevronRight size={18} /></button> : <><button className="secondary-button" onClick={() => { downloadText(`${draft.slug || "sitio"}.html`, html, "text/html"); }}><Download size={17} />Exportar HTML</button><button className="primary-button" disabled={saving} onClick={async () => { const result = await onSave({ ...draft, status: assessment.status }); if (result) { setDraft({ ...result }); setSaved(true); } }}>{saving ? <Loader2 className="spin" /> : saved ? <Check /> : <Save />}{saved ? "Guardado" : "Guardar proyecto"}</button></>}</div></footer>
     </div>
@@ -592,10 +574,15 @@ function WizardLegal({ draft, client, toggle, update, assessment }: {
   return <div className="wizard-step"><div className="step-heading"><p className="overline">05 · Cumplimiento</p><h1>Primero los hechos; después, los textos.</h1><p>La documentación se compone con los tratamientos, proveedores y condiciones reales. Los campos vacíos quedan marcados y bloquean la publicación cuando son esenciales.</p></div>{(!client?.legalName || !client.taxId || !client.address || !client.email) ? <div className="integration-note warning"><AlertTriangle /><div><strong>Ficha del titular incompleta</strong><p>Edita el cliente para completar razón social, NIF/CIF, domicilio y correo. No se pueden sustituir por fórmulas genéricas.</p></div></div> : null}<section className="legal-facts"><div className="section-heading compact"><div><p className="overline">Registro de privacidad</p><h2>Qué ocurre realmente con los datos</h2></div><span>{assessment.score}/100</span></div><div className="legal-profile-grid"><label className="field"><span>Categorías de datos *</span><textarea rows={3} value={draft.legalProfile.dataCategories || ""} onChange={(event) => update("dataCategories", event.target.value)} placeholder="Identificativos, contacto, datos del pedido…" /></label><label className="field"><span>Finalidades concretas *</span><textarea rows={3} value={draft.legalProfile.privacyPurposes || ""} onChange={(event) => update("privacyPurposes", event.target.value)} placeholder="Responder consultas, gestionar reservas…" /></label><label className="field"><span>Base jurídica por finalidad *</span><textarea rows={3} value={draft.legalProfile.legalBasis || ""} onChange={(event) => update("legalBasis", event.target.value)} placeholder="Medidas precontractuales, contrato, consentimiento…" /></label><label className="field"><span>Conservación *</span><textarea rows={3} value={draft.legalProfile.retention || ""} onChange={(event) => update("retention", event.target.value)} placeholder="Plazo o criterio verificable" /></label><label className="field"><span>Destinatarios y encargados *</span><textarea rows={3} value={draft.legalProfile.recipients || ""} onChange={(event) => update("recipients", event.target.value)} placeholder="Proveedor de formularios, reservas, asesoría…" /></label><label className="field"><span>Transferencias internacionales *</span><textarea rows={3} value={draft.legalProfile.internationalTransfers || ""} onChange={(event) => update("internationalTransfers", event.target.value)} placeholder="No previstas, o proveedor, país y garantía" /></label><label className="field"><span>Correo del DPD · si aplica</span><input type="email" value={draft.legalProfile.dpoEmail || ""} onChange={(event) => update("dpoEmail", event.target.value)} placeholder="dpd@empresa.es" /></label><label className="field"><span>Última revisión documentada</span><input type="date" value={draft.legalProfile.lastReviewedAt || ""} onChange={(event) => update("lastReviewedAt", event.target.value)} /></label></div><div className="risk-grid"><label className={draft.legalProfile.marketing ? "active" : ""}><input type="checkbox" checked={Boolean(draft.legalProfile.marketing)} onChange={(event) => update("marketing", event.target.checked)} /><span><strong>Comunicaciones comerciales</strong><small>Añade consentimiento separado y voluntario.</small></span></label><label className={draft.legalProfile.minors ? "active risk" : ""}><input type="checkbox" checked={Boolean(draft.legalProfile.minors)} onChange={(event) => update("minors", event.target.checked)} /><span><strong>Datos de menores</strong><small>Activa revisión específica de edad y autorización.</small></span></label><label className={draft.legalProfile.specialCategories ? "active risk" : ""}><input type="checkbox" checked={Boolean(draft.legalProfile.specialCategories)} onChange={(event) => update("specialCategories", event.target.checked)} /><span><strong>Datos especialmente protegidos</strong><small>Salud, biometría, creencias u otras categorías especiales.</small></span></label><label className={draft.legalProfile.profiling ? "active risk" : ""}><input type="checkbox" checked={Boolean(draft.legalProfile.profiling)} onChange={(event) => update("profiling", event.target.checked)} /><span><strong>Perfilado o decisiones automáticas</strong><small>Exige explicar lógica, relevancia y consecuencias.</small></span></label></div>{riskDeclared ? <label className="professional-review"><input type="checkbox" checked={Boolean(draft.legalProfile.professionalReview)} onChange={(event) => update("professionalReview", event.target.checked)} /><ShieldCheck /><span><strong>Revisión profesional documentada</strong><small>Marca únicamente después de revisar el tratamiento de riesgo y guardar la evidencia fuera del texto web.</small></span></label> : null}{draft.siteType === "ecommerce" ? <div className="commerce-fields"><div className="section-heading compact"><div><p className="overline">Venta a distancia</p><h2>Condiciones comerciales reales</h2></div></div><div className="legal-profile-grid"><label className="field"><span>Medios de pago *</span><textarea rows={3} value={draft.legalProfile.paymentMethods || ""} onChange={(event) => update("paymentMethods", event.target.value)} /></label><label className="field"><span>Entrega o ejecución *</span><textarea rows={3} value={draft.legalProfile.deliveryTerms || ""} onChange={(event) => update("deliveryTerms", event.target.value)} placeholder="Zona, plazo, transportista y restricciones" /></label><label className="field"><span>Costes de devolución *</span><textarea rows={3} value={draft.legalProfile.returnCosts || ""} onChange={(event) => update("returnCosts", event.target.value)} /></label><label className="field"><span>Desistimiento y excepciones *</span><textarea rows={3} value={draft.legalProfile.withdrawalInfo || ""} onChange={(event) => update("withdrawalInfo", event.target.value)} placeholder="Plazo, canal, modelo y excepción si existe" /></label></div></div> : null}</section><div className="audit-inline"><div><ShieldCheck /><span><strong>Evaluación de configuración</strong><small>{assessment.blockers.length} bloqueos · {assessment.warnings.length} advertencias</small></span></div>{findings.length ? <ul>{findings.map((finding) => <li key={finding.id} className={finding.severity}><span>{finding.severity === "critical" ? "Bloqueo" : "Revisar"}</span><div><strong>{finding.label}</strong><small>{finding.detail}</small></div></li>)}</ul> : <p><CheckCircle2 />La configuración no presenta hallazgos. Aún debe verificarse el sitio desplegado.</p>}</div><div className="legal-workspace"><div className="legal-controls">{controls.map((control) => { const Icon = control.icon; return <button key={control.id} className={draft.legal[control.id] ? "active" : ""} onClick={() => toggle(control.id)}><Icon /><span><strong>{control.label}</strong><small>{draft.legal[control.id] ? "Incluido en el paquete" : "Desactivado"}</small></span><span className="toggle"><i /></span></button>; })}</div><div className="document-preview"><div className="doc-tabs"><button className={doc === "privacy" ? "active" : ""} onClick={() => setDoc("privacy")}>Privacidad</button><button className={doc === "legal" ? "active" : ""} onClick={() => setDoc("legal")}>Aviso legal</button><button className={doc === "cookies" ? "active" : ""} onClick={() => setDoc("cookies")}>Cookies</button>{draft.siteType === "ecommerce" ? <button className={doc === "terms" ? "active" : ""} onClick={() => setDoc("terms")}>Contratación</button> : null}</div><pre>{legalDocument(client, draft, doc)}</pre><div className="doc-actions"><button className="secondary-button small" onClick={() => void navigator.clipboard.writeText(legalDocument(client, draft, doc))}><Code2 />Copiar</button><button className="secondary-button small" onClick={() => downloadText((draft.slug || "proyecto") + "-" + doc + ".txt", legalDocument(client, draft, doc))}><Download />Descargar</button></div></div></div></div>;
 }
 
-function GithubPublish({ project }: { project: ProjectDraft & { id: string } }) {
+function GithubPublish({ project, client, storageMode, onPublished }: { project: ProjectDraft & { id: string }; client: Client; storageMode: "browser" | "server"; onPublished: (metadata: PublicationMetadata) => Promise<void> | void }) {
   const { status, loading } = useGithubStatus();
   const [name, setName] = useState(project.githubRepoFullName?.split("/").at(-1) || project.slug);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [publishKey, setPublishKey] = useState(() =>
+    typeof window === "undefined"
+      ? ""
+      : window.sessionStorage.getItem("archic-studio:publish-key") ?? "",
+  );
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ url: string; fullName: string; pushedAt: string } | null>(project.githubRepoUrl ? { url: project.githubRepoUrl, fullName: project.githubRepoFullName, pushedAt: project.githubLastPushAt } : null);
@@ -604,10 +591,32 @@ function GithubPublish({ project }: { project: ProjectDraft & { id: string } }) 
     setPublishing(true);
     setError("");
     try {
-      const response = await fetch("/api/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, repoName: name, visibility }) });
-      const payload = await response.json() as { error?: string; repository?: { url: string; fullName: string }; pushedAt?: string };
+      if (status?.requiresPublishKey) {
+        window.sessionStorage.setItem("archic-studio:publish-key", publishKey);
+      }
+      const response = await fetch("/api/github", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(status?.requiresPublishKey ? { "x-archic-publish-key": publishKey } : {}),
+        },
+        body: JSON.stringify({
+          projectId: project.id,
+          repoName: name,
+          visibility,
+          ...(storageMode === "browser" ? { project, client } : {}),
+        }),
+      });
+      const payload = await response.json() as { error?: string; repository?: { url: string; fullName: string; branch: string }; pushedAt?: string };
       if (!response.ok || !payload.repository) throw new Error(payload.error || "No se pudo publicar.");
-      setResult({ url: payload.repository.url, fullName: payload.repository.fullName, pushedAt: payload.pushedAt || new Date().toISOString() });
+      const pushedAt = payload.pushedAt || new Date().toISOString();
+      setResult({ url: payload.repository.url, fullName: payload.repository.fullName, pushedAt });
+      await onPublished({
+        githubRepoFullName: payload.repository.fullName,
+        githubRepoUrl: payload.repository.url,
+        githubDefaultBranch: payload.repository.branch,
+        githubLastPushAt: pushedAt,
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "No se pudo publicar.");
     } finally {
@@ -615,17 +624,19 @@ function GithubPublish({ project }: { project: ProjectDraft & { id: string } }) 
     }
   };
 
-  return <div className="github-publish"><div className="publish-title"><Github /><div><strong>Publicar en GitHub</strong><small>{loading ? "Comprobando conexión…" : status?.connected ? `Cuenta ${status.owner}` : "Conexión pendiente"}</small></div></div>{result ? <a className="published-repo" href={result.url} target="_blank" rel="noreferrer"><span><CheckCircle2 /><b>{result.fullName}</b><small>Último envío {formatDate(result.pushedAt)}</small></span><ArrowUpRight /></a> : null}<label className="field"><span>Repositorio</span><input value={name} onChange={(event) => setName(slugify(event.target.value))} /></label><div className="visibility-choice"><button className={visibility === "private" ? "active" : ""} onClick={() => setVisibility("private")}><LockKeyhole />Privado</button><button className={visibility === "public" ? "active" : ""} onClick={() => setVisibility("public")}><Globe2 />Público</button></div>{error ? <p className="publish-error">{error}</p> : null}<button className="github-button" onClick={() => void publish()} disabled={!status?.connected || publishing || !name}>{publishing ? <Loader2 className="spin" /> : <Rocket />}{result ? "Enviar nueva versión" : "Crear repositorio y enviar"}</button></div>;
+  return <div className="github-publish"><div className="publish-title"><Github /><div><strong>Publicar en GitHub</strong><small>{loading ? "Comprobando conexión…" : status?.connected ? `Cuenta ${status.owner}` : "Conexión pendiente"}</small></div></div>{result ? <a className="published-repo" href={result.url} target="_blank" rel="noreferrer"><span><CheckCircle2 /><b>{result.fullName}</b><small>Último envío {formatDate(result.pushedAt)}</small></span><ArrowUpRight /></a> : null}<label className="field"><span>Repositorio</span><input value={name} onChange={(event) => setName(slugify(event.target.value))} /></label>{status?.requiresPublishKey ? <label className="field"><span>Clave de publicación</span><input type="password" autoComplete="off" value={publishKey} onChange={(event) => setPublishKey(event.target.value)} placeholder="Clave privada de Archic" /></label> : null}<div className="visibility-choice"><button className={visibility === "private" ? "active" : ""} onClick={() => setVisibility("private")}><LockKeyhole />Privado</button><button className={visibility === "public" ? "active" : ""} onClick={() => setVisibility("public")}><Globe2 />Público</button></div>{error ? <p className="publish-error">{error}</p> : null}<button className="github-button" onClick={() => void publish()} disabled={!status?.connected || publishing || !name || (status.requiresPublishKey && !publishKey)}>{publishing ? <Loader2 className="spin" /> : <Rocket />}{result ? "Enviar nueva versión" : "Crear repositorio y enviar"}</button></div>;
 }
 
-function WizardPreview({ draft, client, html, device, setDevice, assessment }: {
+function WizardPreview({ draft, client, html, device, setDevice, assessment, storageMode, onPublished }: {
   draft: ProjectDraft;
   client?: Client;
   html: string;
   device: "desktop" | "tablet" | "mobile";
   setDevice: (device: "desktop" | "tablet" | "mobile") => void;
   assessment: ReturnType<typeof assessProject>;
+  storageMode: "browser" | "server";
+  onPublished: (metadata: PublicationMetadata) => Promise<void> | void;
 }) {
   const findings = [...assessment.blockers, ...assessment.warnings];
-  return <div className="wizard-step preview-step"><div className="step-heading preview-heading"><div><p className="overline">06 · Revisión final</p><h1>{assessment.blockers.length ? "La web se puede revisar; aún no publicar." : "La base está lista para verificar."}</h1><p>{assessment.blockers.length ? "Cierra los bloqueos señalados. Puedes guardar y exportar un borrador, pero GitHub permanecerá bloqueado." : "Revisa el resultado en cada tamaño, guarda el proyecto y comprueba el despliegue real antes de hacerlo público."}</p></div><div className="device-switch"><button className={device === "desktop" ? "active" : ""} onClick={() => setDevice("desktop")} aria-label="Escritorio"><Monitor /></button><button className={device === "tablet" ? "active" : ""} onClick={() => setDevice("tablet")} aria-label="Tablet"><Tablet /></button><button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")} aria-label="Móvil"><Smartphone /></button></div></div><div className="preview-layout"><div className={"site-preview site-preview-" + device}><div className="preview-browser"><span><i /><i /><i /></span><div><LockKeyhole size={13} />{draft.slug || "nuevo-proyecto"}.archic.es</div><ArrowUpRight size={16} /></div><iframe title={"Vista previa de " + draft.name} srcDoc={html} sandbox="allow-scripts allow-forms allow-modals" /></div><aside className="preview-summary"><p className="overline">Preparación</p><div className={"readiness-score " + (assessment.blockers.length ? "blocked" : "ready")}><strong>{assessment.score}</strong><span>/100</span><small>{assessment.blockers.length ? "Publicación bloqueada" : "Sin bloqueos de configuración"}</small></div><h2>{draft.name}</h2><dl><div><dt>Cliente</dt><dd>{client?.name || "Sin cliente"}</dd></div><div><dt>Objetivo</dt><dd>{draft.brief.objective || "Pendiente"}</dd></div><div><dt>Público</dt><dd>{draft.brief.audience || "Pendiente"}</dd></div><div><dt>Dirección</dt><dd>{TEMPLATES.find((item) => item.id === draft.template)?.name}</dd></div><div><dt>Servicios</dt><dd>{draft.brief.services?.length || 0}</dd></div><div><dt>Integraciones</dt><dd>{draft.integrations.length}</dd></div></dl>{findings.length ? <div className="preview-findings">{findings.slice(0, 5).map((finding) => <div key={finding.id} className={finding.severity}><AlertTriangle /><span><strong>{finding.label}</strong><small>{finding.detail}</small></span></div>)}</div> : null}<button className="secondary-button" onClick={() => downloadText((draft.slug || "proyecto") + "-config.json", JSON.stringify({ client, project: draft, audit: assessment }, null, 2), "application/json")}><Download />Descargar configuración</button><p className="preview-help"><Code2 />El paquete contiene web, documentos legales separados, inventario de consentimiento, configuración y un informe honesto de hallazgos.</p>{draft.id && !assessment.blockers.length ? <GithubPublish project={draft as ProjectDraft & { id: string }} /> : draft.id ? <div className="save-first publish-blocked"><AlertTriangle /><p><strong>Publicación bloqueada</strong><span>Resuelve los controles críticos del paso Legal. El servidor volverá a comprobarlos antes de crear o actualizar el repositorio.</span></p></div> : <div className="save-first"><Github /><p><strong>Guarda primero el proyecto</strong><span>Después podrás crear el repositorio si no quedan bloqueos críticos.</span></p></div>}</aside></div></div>;
+  return <div className="wizard-step preview-step"><div className="step-heading preview-heading"><div><p className="overline">06 · Revisión final</p><h1>{assessment.blockers.length ? "La web se puede revisar; aún no publicar." : "La base está lista para verificar."}</h1><p>{assessment.blockers.length ? "Cierra los bloqueos señalados. Puedes guardar y exportar un borrador, pero GitHub permanecerá bloqueado." : "Revisa el resultado en cada tamaño, guarda el proyecto y comprueba el despliegue real antes de hacerlo público."}</p></div><div className="device-switch"><button className={device === "desktop" ? "active" : ""} onClick={() => setDevice("desktop")} aria-label="Escritorio"><Monitor /></button><button className={device === "tablet" ? "active" : ""} onClick={() => setDevice("tablet")} aria-label="Tablet"><Tablet /></button><button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")} aria-label="Móvil"><Smartphone /></button></div></div><div className="preview-layout"><div className={"site-preview site-preview-" + device}><div className="preview-browser"><span><i /><i /><i /></span><div><LockKeyhole size={13} />{draft.slug || "nuevo-proyecto"}.archic.es</div><ArrowUpRight size={16} /></div><iframe title={"Vista previa de " + draft.name} srcDoc={html} sandbox="allow-scripts allow-forms allow-modals" /></div><aside className="preview-summary"><p className="overline">Preparación</p><div className={"readiness-score " + (assessment.blockers.length ? "blocked" : "ready")}><strong>{assessment.score}</strong><span>/100</span><small>{assessment.blockers.length ? "Publicación bloqueada" : "Sin bloqueos de configuración"}</small></div><h2>{draft.name}</h2><dl><div><dt>Cliente</dt><dd>{client?.name || "Sin cliente"}</dd></div><div><dt>Objetivo</dt><dd>{draft.brief.objective || "Pendiente"}</dd></div><div><dt>Público</dt><dd>{draft.brief.audience || "Pendiente"}</dd></div><div><dt>Dirección</dt><dd>{TEMPLATES.find((item) => item.id === draft.template)?.name}</dd></div><div><dt>Servicios</dt><dd>{draft.brief.services?.length || 0}</dd></div><div><dt>Integraciones</dt><dd>{draft.integrations.length}</dd></div></dl>{findings.length ? <div className="preview-findings">{findings.slice(0, 5).map((finding) => <div key={finding.id} className={finding.severity}><AlertTriangle /><span><strong>{finding.label}</strong><small>{finding.detail}</small></span></div>)}</div> : null}<button className="secondary-button" onClick={() => downloadText((draft.slug || "proyecto") + "-config.json", JSON.stringify({ client, project: draft, audit: assessment }, null, 2), "application/json")}><Download />Descargar configuración</button><p className="preview-help"><Code2 />El paquete contiene web, documentos legales separados, inventario de consentimiento, configuración y un informe honesto de hallazgos.</p>{draft.id && client && !assessment.blockers.length ? <GithubPublish project={draft as ProjectDraft & { id: string }} client={client} storageMode={storageMode} onPublished={onPublished} /> : draft.id ? <div className="save-first publish-blocked"><AlertTriangle /><p><strong>Publicación bloqueada</strong><span>Resuelve los controles críticos del paso Legal. El servidor volverá a comprobarlos antes de crear o actualizar el repositorio.</span></p></div> : <div className="save-first"><Github /><p><strong>Guarda primero el proyecto</strong><span>Después podrás crear el repositorio si no quedan bloqueos críticos.</span></p></div>}</aside></div></div>;
 }

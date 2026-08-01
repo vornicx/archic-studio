@@ -7,7 +7,7 @@ directa en GitHub.
 ## Qué incluye
 
 - fichas de cliente con datos legales;
-- proyectos y auditorías persistentes en Cloudflare D1;
+- proyectos y auditorías persistentes en Cloudflare D1 o, en Vercel, en el navegador privado del usuario;
 - constructor en seis pasos con briefing empresarial obligatorio;
 - tres direcciones creativas: Origen, Forja y Atelier;
 - público, objetivo, propuesta de valor, servicios, diferenciales, pruebas, voz y CTA propios;
@@ -29,12 +29,30 @@ Configura estas variables como secretos del entorno:
 ```text
 GITHUB_TOKEN=
 GITHUB_OWNER=vornicx
+ARCHIC_PUBLISH_KEY=
 ```
 
 La credencial debe estar limitada a la cuenta de Archic y permitir crear
 repositorios y escribir su contenido. Cada publicación genera `index.html`,
 `styles.css`, `script.js`, páginas legales independientes,
 `consent-manifest.json`, `vercel.json`, `archic.project.json` y `README.md`.
+
+En Vercel, `ARCHIC_PUBLISH_KEY` es obligatoria. El Studio la solicita al
+publicar, la conserva solo durante la sesión del navegador y la compara en el
+servidor antes de usar `GITHUB_TOKEN`. Utiliza una clave larga y distinta del
+token de GitHub.
+
+## Despliegue en Vercel
+
+El script `npm run build` detecta `VERCEL=1` y ejecuta el build nativo de
+Next.js, que produce la carpeta `.next` esperada por la plataforma. Fuera de
+Vercel conserva el build Vinext/Cloudflare y su validación de Worker.
+
+No configures manualmente otro directorio de salida en Vercel: deja el preset
+Next.js y la salida predeterminada. En este modo, clientes, proyectos y
+auditorías se guardan en `localStorage`; sobreviven a recargas en el mismo
+navegador, pero no se sincronizan entre dispositivos. Para persistencia
+centralizada y multiusuario, despliega el destino Cloudflare con su binding D1.
 
 ## Flujo de producción
 
@@ -57,8 +75,8 @@ cookies reales, la accesibilidad y la correspondencia entre textos y actividad.
 
 ## Arquitectura
 
-- Vinext/React para la aplicación y sus rutas de servidor.
-- Cloudflare D1 + Drizzle para clientes, proyectos y auditorías.
+- Next.js en Vercel y Vinext/React en Cloudflare, desde la misma fuente.
+- Cloudflare D1 + Drizzle para persistencia central, con almacenamiento local aislado por origen como alternativa Vercel sin base externa.
 - API REST de GitHub para repositorios y versiones generadas.
 - Acceso privado gestionado por la política de Archic Studio.
 
@@ -150,8 +168,11 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 - `npm run install:ci`: perform the one bounded lockfile install
 - `npm run dev`: start the Vite/Vinext development server
-- `npm run build`: build and validate the deployable Sites artifact
+- `npm run build`: seleccionar automáticamente el artefacto de Vercel o Cloudflare
+- `npm run build:vercel`: generar `.next` con el build nativo de Next.js
+- `npm run build:cloudflare`: generar y validar el Worker Vinext
 - `npm run start`: start the built Vinext application
+- `npm run start:vercel`: iniciar localmente el build nativo de Next.js
 - `npm test`: build, validate, and verify the rendered development-preview metadata
 - `npm run validate:artifact`: recheck an existing artifact's manifest and ESM `default.fetch` export
 - `npm run db:generate`: generate Drizzle migrations after schema changes

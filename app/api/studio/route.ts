@@ -7,6 +7,7 @@ import {
   type GeneratorProject,
   type LegalProfile,
 } from "../../../lib/site-generator";
+import { createDemoStudioData } from "../../../lib/studio-local";
 
 type ClientInput = {
   id?: string;
@@ -45,6 +46,10 @@ type ProjectInput = {
 
 function owner(request: Request) {
   return request.headers.get("oai-authenticated-user-email") ?? "vadim@archic.es";
+}
+
+function usesBrowserStorage() {
+  return process.env.VERCEL === "1" || process.env.ARCHIC_STORAGE_MODE === "browser";
 }
 
 function clean(value: unknown, fallback = "", maxLength = 5000) {
@@ -233,6 +238,9 @@ async function snapshot(email: string) {
 
 export async function GET(request: Request) {
   try {
+    if (usesBrowserStorage()) {
+      return Response.json({ ...createDemoStudioData(), storageMode: "browser" });
+    }
     const email = owner(request);
     await ensureSchema();
     await seed(email);
@@ -244,6 +252,12 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    if (usesBrowserStorage()) {
+      return Response.json(
+        { error: "En este despliegue los cambios se guardan de forma privada en el navegador." },
+        { status: 409 },
+      );
+    }
     const email = owner(request);
     await ensureSchema();
     const body = await request.json() as { action?: string; client?: ClientInput; project?: ProjectInput; id?: string };

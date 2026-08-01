@@ -1,7 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import { ensureSchema, getDb } from "../../../db";
 import { clients, projects } from "../../../db/schema";
-import { assessProject, buildSiteBundle, type GeneratorProject } from "../../../lib/site-generator";
+import { runtimeEnv } from "../../../lib/runtime-env";
+import { assessProject, buildSiteBundle, type GeneratorClient, type GeneratorProject } from "../../../lib/site-generator";
+import { normalizeGeneratorProject, type StudioClient, type StudioProject } from "../../../lib/studio-local";
 
 type GithubUser = { login: string; name?: string | null; avatar_url?: string; html_url: string };
 type GithubRepo = { full_name: string; html_url: string; default_branch: string; private: boolean };
@@ -11,11 +13,42 @@ function ownerEmail(request: Request) {
 }
 
 async function githubConfig() {
-  const workers = await import("cloudflare:workers");
-  const runtime = workers.env as unknown as Record<string, string | undefined>;
+  const runtime = await runtimeEnv();
+  const requiresPublishKey = runtime.VERCEL === "1";
   return {
     token: runtime.GITHUB_TOKEN?.trim() ?? "",
     owner: runtime.GITHUB_OWNER?.trim() ?? "",
+    publishKey: runtime.ARCHIC_PUBLISH_KEY?.trim() ?? "",
+    requiresPublishKey,
+  };
+}
+
+function secretMatches(expected: string, supplied: string) {
+  if (!expected || expected.length !== supplied.length) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= expected.charCodeAt(index) ^ supplied.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function clean(value: unknown, maxLength = 5000) {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function publishClient(input: Partial<StudioClient>): GeneratorClient {
+  return {
+    name: clean(input.name),
+    legalName: clean(input.legalName),
+    taxId: clean(input.taxId),
+    email: clean(input.email, 320),
+    phone: clean(input.phone, 120),
+    address: clean(input.address),
+    city: clean(input.city, 240),
+    country: clean(input.country, 240),
+    sector: clean(input.sector, 240),
+    registryData: clean(input.registryData),
+    professionalData: clean(input.professionalData),
   };
 }
 
@@ -81,13 +114,16 @@ async function upsertFile(token: string, repo: string, path: string, content: st
 export async function GET() {
   const config = await githubConfig();
   if (!config.token) {
-    return Response.json({ connected: false, owner: config.owner, reason: "missing_token" });
+    return Response.json({ connected: false, owner: config.owner, reason: "missing_token", requiresPublishKey: config.requiresPublishKey });
+  }
+  if (config.requiresPublishKey && !config.publishKey) {
+    return Response.json({ connected: false, owner: config.owner, reason: "missing_publish_key", requiresPublishKey: true });
   }
   try {
     const user = await githubRequest<GithubUser>(config.token, "/user");
-    return Response.json({ connected: true, owner: config.owner || user.login, user });
+    return Response.json({ connected: true, owner: config.owner || user.login, user, requiresPublishKey: config.requiresPublishKey });
   } catch (error) {
-    return Response.json({ connected: false, owner: config.owner, reason: "invalid_token", error: error instanceof Error ? error.message : "No se pudo validar GitHub." });
+    return Response.json({ connected: false, owner: config.owner, reason: "invalid_token", error: error instanceof Error ? error.message : "No se pudo validar GitHub.", requiresPublishKey: config.requiresPublishKey });
   }
 }
 
@@ -97,35 +133,66 @@ export async function POST(request: Request) {
     if (!config.token) {
       return Response.json({ error: "GitHub todavía no está conectado. Añade GITHUB_TOKEN como secreto del Studio." }, { status: 503 });
     }
-    const body = await request.json() as { projectId?: string; repoName?: string; visibility?: "private" | "public" };
-    if (!body.projectId) return Response.json({ error: "Proyecto no válido." }, { status: 400 });
+    if (config.requiresPublishKey) {
+      if (!config.publishKey) {
+        return Response.json({ error: "Configura ARCHIC_PUBLISH_KEY como secreto de Vercel antes de habilitar publicaciones." }, { status: 503 });
+      }
+      const supplied = request.headers.get("x-archic-publish-key") ?? "";
+      if (!secretMatches(config.publishKey, supplied)) {
+        return Response.json({ error: "La clave de publicación no es válida." }, { status: 401 });
+      }
+    }
+    const body = await request.json() as {
+      projectId?: string;
+      repoName?: string;
+      visibility?: "private" | "public";
+      project?: Partial<StudioProject>;
+      client?: Partial<StudioClient>;
+    };
+    const projectId = body.project?.id || body.projectId;
+    if (!projectId) return Response.json({ error: "Proyecto no válido." }, { status: 400 });
     const name = repoName(body.repoName);
     if (!name) return Response.json({ error: "Escribe un nombre válido para el repositorio." }, { status: 400 });
 
-    await ensureSchema();
-    const email = ownerEmail(request);
-    const db = await getDb();
-    const [project] = await db.select().from(projects).where(and(eq(projects.id, body.projectId), eq(projects.ownerEmail, email))).limit(1);
-    if (!project) return Response.json({ error: "Proyecto no encontrado." }, { status: 404 });
-    const [client] = await db.select().from(clients).where(and(eq(clients.id, project.clientId), eq(clients.ownerEmail, email))).limit(1);
-    if (!client) return Response.json({ error: "Cliente no encontrado." }, { status: 404 });
+    let client: GeneratorClient;
+    let generatedProject: GeneratorProject;
+    let persistence: {
+      db: Awaited<ReturnType<typeof getDb>>;
+      email: string;
+      projectId: string;
+    } | null = null;
 
-    const generatedProject: GeneratorProject = {
-      name: project.name,
-      slug: project.slug,
-      siteType: project.siteType,
-      template: project.template,
-      primaryColor: project.primaryColor,
-      accentColor: project.accentColor,
-      headline: project.headline,
-      subheadline: project.subheadline,
-      heroImageUrl: project.heroImageUrl,
-      sections: JSON.parse(project.sectionsJson) as string[],
-      integrations: JSON.parse(project.integrationsJson) as string[],
-      legal: JSON.parse(project.legalJson) as Record<string, boolean>,
-      brief: JSON.parse(project.briefJson),
-      legalProfile: JSON.parse(project.legalProfileJson),
-    };
+    if (body.project && body.client) {
+      client = publishClient(body.client);
+      generatedProject = normalizeGeneratorProject(body.project);
+    } else {
+      await ensureSchema();
+      const email = ownerEmail(request);
+      const db = await getDb();
+      const [project] = await db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.ownerEmail, email))).limit(1);
+      if (!project) return Response.json({ error: "Proyecto no encontrado." }, { status: 404 });
+      const [storedClient] = await db.select().from(clients).where(and(eq(clients.id, project.clientId), eq(clients.ownerEmail, email))).limit(1);
+      if (!storedClient) return Response.json({ error: "Cliente no encontrado." }, { status: 404 });
+      client = storedClient;
+      generatedProject = {
+        name: project.name,
+        slug: project.slug,
+        siteType: project.siteType,
+        template: project.template,
+        primaryColor: project.primaryColor,
+        accentColor: project.accentColor,
+        headline: project.headline,
+        subheadline: project.subheadline,
+        heroImageUrl: project.heroImageUrl,
+        sections: JSON.parse(project.sectionsJson) as string[],
+        integrations: JSON.parse(project.integrationsJson) as string[],
+        legal: JSON.parse(project.legalJson) as Record<string, boolean>,
+        brief: JSON.parse(project.briefJson),
+        legalProfile: JSON.parse(project.legalProfileJson),
+      };
+      persistence = { db, email, projectId: project.id };
+    }
+
     const audit = assessProject(client, generatedProject);
     if (audit.blockers.length) {
       return Response.json({
@@ -148,7 +215,7 @@ export async function POST(request: Request) {
         method: "POST",
         body: JSON.stringify({
           name,
-          description: `${client.name} · sitio generado con Archic Studio`,
+          description: `${client.name || generatedProject.name || "Sitio"} · sitio generado con Archic Studio`,
           private: body.visibility !== "public",
           has_issues: true,
           has_projects: false,
@@ -175,13 +242,15 @@ export async function POST(request: Request) {
     }
 
     const pushedAt = new Date().toISOString();
-    await db.update(projects).set({
-      githubRepoFullName: repo.full_name,
-      githubRepoUrl: repo.html_url,
-      githubDefaultBranch: branch,
-      githubLastPushAt: pushedAt,
-      updatedAt: pushedAt,
-    }).where(and(eq(projects.id, project.id), eq(projects.ownerEmail, email)));
+    if (persistence) {
+      await persistence.db.update(projects).set({
+        githubRepoFullName: repo.full_name,
+        githubRepoUrl: repo.html_url,
+        githubDefaultBranch: branch,
+        githubLastPushAt: pushedAt,
+        updatedAt: pushedAt,
+      }).where(and(eq(projects.id, persistence.projectId), eq(projects.ownerEmail, persistence.email)));
+    }
 
     return Response.json({
       ok: true,
