@@ -1,0 +1,60 @@
+import { sql } from "drizzle-orm";
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const clients = sqliteTable("clients", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  name: text("name").notNull(),
+  legalName: text("legal_name").notNull().default(""),
+  taxId: text("tax_id").notNull().default(""),
+  email: text("email").notNull().default(""),
+  phone: text("phone").notNull().default(""),
+  address: text("address").notNull().default(""),
+  city: text("city").notNull().default(""),
+  country: text("country").notNull().default("España"),
+  sector: text("sector").notNull().default("Servicios"),
+  registryData: text("registry_data").notNull().default(""),
+  professionalData: text("professional_data").notNull().default(""),
+  status: text("status").notNull().default("active"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const projects = sqliteTable("projects", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  clientId: text("client_id").notNull().references(() => clients.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(),
+  siteType: text("site_type").notNull().default("corporate"),
+  template: text("template").notNull().default("costa"),
+  primaryColor: text("primary_color").notNull().default("#0B1628"),
+  accentColor: text("accent_color").notNull().default("#B7924C"),
+  headline: text("headline").notNull().default(""),
+  subheadline: text("subheadline").notNull().default(""),
+  heroImageUrl: text("hero_image_url").notNull().default(""),
+  sectionsJson: text("sections_json").notNull().default("[]"),
+  integrationsJson: text("integrations_json").notNull().default("[]"),
+  legalJson: text("legal_json").notNull().default("{}"),
+  briefJson: text("brief_json").notNull().default("{}"),
+  legalProfileJson: text("legal_profile_json").notNull().default("{}"),
+  status: text("status").notNull().default("draft"),
+  complianceScore: integer("compliance_score").notNull().default(0),
+  githubRepoFullName: text("github_repo_full_name").notNull().default(""),
+  githubRepoUrl: text("github_repo_url").notNull().default(""),
+  githubDefaultBranch: text("github_default_branch").notNull().default("main"),
+  githubLastPushAt: text("github_last_push_at").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const auditEvents = sqliteTable("audit_events", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  detail: text("detail").notNull().default(""),
+  severity: text("severity").notNull().default("info"),
+  status: text("status").notNull().default("open"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

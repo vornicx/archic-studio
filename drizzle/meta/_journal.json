@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1785541933477,
+      "tag": "0000_gray_yellow_claw",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785569733958,
+      "tag": "0001_wakeful_korg",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785587674410,
+      "tag": "0002_bored_professor_monster",
+      "breakpoints": true
+    }
+  ]
+}
