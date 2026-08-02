@@ -5,8 +5,6 @@ import {
   type LegalProfile,
 } from "./site-generator.ts";
 
-export const LOCAL_STUDIO_STORAGE_VERSION = "archic-studio:v1";
-
 export type StudioClient = {
   id: string;
   name: string;
@@ -21,6 +19,9 @@ export type StudioClient = {
   registryData: string;
   professionalData: string;
   status: string;
+  revision?: number;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -48,6 +49,9 @@ export type StudioProject = {
   githubRepoUrl: string;
   githubDefaultBranch: string;
   githubLastPushAt: string;
+  revision?: number;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -59,6 +63,27 @@ export type StudioAudit = {
   detail: string;
   severity: string;
   status: string;
+  createdBy?: string;
+  createdAt: string;
+};
+
+export type StudioMember = {
+  id: string;
+  email: string;
+  name: string;
+  slot: 1 | 2;
+  color: string;
+  createdAt: string;
+};
+
+export type StudioActivity = {
+  id: string;
+  actorId: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  entityName: string;
+  detail: string;
   createdAt: string;
 };
 
@@ -187,6 +212,9 @@ function projectRecord(
     githubRepoUrl: clean(input.githubRepoUrl, previous?.githubRepoUrl ?? ""),
     githubDefaultBranch: clean(input.githubDefaultBranch, previous?.githubDefaultBranch || "main"),
     githubLastPushAt: clean(input.githubLastPushAt, previous?.githubLastPushAt ?? ""),
+    revision: (previous?.revision ?? 0) + 1,
+    createdBy: previous?.createdBy ?? "",
+    updatedBy: previous?.updatedBy ?? "",
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
   };
@@ -211,6 +239,9 @@ function clientRecord(
     registryData: clean(input.registryData, previous?.registryData ?? ""),
     professionalData: clean(input.professionalData, previous?.professionalData ?? ""),
     status: previous?.status ?? "active",
+    revision: (previous?.revision ?? 0) + 1,
+    createdBy: previous?.createdBy ?? "",
+    updatedBy: previous?.updatedBy ?? "",
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
   };
@@ -347,221 +378,6 @@ export function parseLocalStudioData(value: string | null): StudioData | null {
   }
 }
 
-function demoProject(
-  values: Partial<StudioProject> & Pick<StudioProject, "id" | "clientId" | "name" | "slug">,
-  createdAt: string,
-): StudioProject {
-  return {
-    siteType: "corporate",
-    template: "costa",
-    primaryColor: "#0B1628",
-    accentColor: "#B7924C",
-    headline: "",
-    subheadline: "",
-    heroImageUrl: "",
-    sections: ["hero", "services", "about", "contact"],
-    integrations: ["maps", "whatsapp"],
-    legal: {
-      privacy: true,
-      legalNotice: true,
-      cookieBanner: true,
-      scriptBlocking: true,
-      formNotices: true,
-      accessibility: true,
-      security: true,
-    },
-    brief: {},
-    legalProfile: {},
-    status: "ready",
-    complianceScore: 100,
-    githubRepoFullName: "",
-    githubRepoUrl: "",
-    githubDefaultBranch: "main",
-    githubLastPushAt: "",
-    createdAt,
-    updatedAt: createdAt,
-    ...values,
-  };
-}
-
-export function createDemoStudioData(): StudioData {
-  const createdAt = new Date().toISOString();
-  const clients: StudioClient[] = [
-    {
-      id: "demo-client-sillas",
-      name: "Sillas Juan y Lola",
-      legalName: "Sillas Juan y Lola, S.L.",
-      taxId: "B12345678",
-      email: "info@sillasjuanylola.com",
-      phone: "+34 600 123 456",
-      address: "Calle del Comercio, 12",
-      city: "Écija",
-      country: "España",
-      sector: "Eventos y alquiler",
-      registryData: "Datos de demostración: completar desde la escritura o nota registral",
-      professionalData: "",
-      status: "active",
-      createdAt,
-      updatedAt: createdAt,
-    },
-    {
-      id: "demo-client-montajes",
-      name: "Montajes Noguera",
-      legalName: "Montajes Noguera",
-      taxId: "45871236R",
-      email: "contacto@montajesnoguera.es",
-      phone: "+34 611 842 900",
-      address: "Polígono Industrial La Campiña",
-      city: "Écija",
-      country: "España",
-      sector: "Industria y montajes",
-      registryData: "",
-      professionalData: "",
-      status: "active",
-      createdAt,
-      updatedAt: createdAt,
-    },
-    {
-      id: "demo-client-peluqueria",
-      name: "Ignacio Ostos Peluquería",
-      legalName: "Ignacio Ostos",
-      taxId: "28844119T",
-      email: "hola@ignacioostos.es",
-      phone: "+34 622 305 118",
-      address: "Calle Cintería, 8",
-      city: "Écija",
-      country: "España",
-      sector: "Belleza y bienestar",
-      registryData: "",
-      professionalData: "",
-      status: "active",
-      createdAt,
-      updatedAt: createdAt,
-    },
-  ];
-
-  const projects: StudioProject[] = [
-    demoProject({
-      id: "demo-project-sillas",
-      clientId: clients[0].id,
-      name: "Catálogo y alquiler",
-      slug: "sillas-juan-y-lola",
-      primaryColor: "#8E1F2F",
-      accentColor: "#C7A35A",
-      headline: "Celebraciones con un lugar para cada historia.",
-      subheadline: "Alquiler de mobiliario con una colección versátil y una atención pensada para que organizar sea más sencillo.",
-      sections: ["hero", "services", "catalog", "about", "contact"],
-      brief: {
-        objective: "Generar solicitudes de presupuesto para eventos",
-        audience: "Parejas, espacios y profesionales que organizan celebraciones en Andalucía",
-        valueProposition: "Mobiliario con carácter, asesoramiento cercano y una logística que simplifica cada montaje",
-        services: ["Alquiler de mobiliario | Mesas, sillas y piezas auxiliares elegidas para cada celebración", "Asesoramiento de colección | Combinaciones coherentes con el espacio, el estilo y el aforo", "Entrega y recogida | Coordinación logística para llegar a tiempo y sin improvisaciones"],
-        differentiators: ["Una colección propia que evita celebraciones intercambiables", "Acompañamiento directo desde la selección hasta la recogida"],
-        tone: "cercano",
-        primaryCta: "Pedir propuesta",
-        aboutStory: "Juan y Lola unen selección, logística y atención personal para que el mobiliario acompañe la celebración sin convertirse en otra preocupación.",
-        proofPoints: ["Colección versátil para interior y exterior", "Montajes coordinados con espacios y proveedores", "Atención local desde Écija"],
-        seoKeywords: ["alquiler mobiliario eventos", "sillas bodas Écija"],
-      },
-      legalProfile: {
-        dataCategories: "Datos identificativos y de contacto facilitados en el formulario",
-        privacyPurposes: "Responder consultas y preparar presupuestos solicitados",
-        legalBasis: "Medidas precontractuales solicitadas por la persona interesada",
-        retention: "Durante la gestión de la solicitud y los plazos legales posteriores",
-        recipients: "Proveedores tecnológicos contratados como encargados; no se prevén cesiones salvo obligación legal",
-        internationalTransfers: "Revisar las garantías de Google Maps antes de publicar",
-        lastReviewedAt: "2026-08-01",
-      },
-    }, createdAt),
-    demoProject({
-      id: "demo-project-montajes",
-      clientId: clients[1].id,
-      name: "Web corporativa",
-      slug: "montajes-noguera",
-      template: "atlas",
-      primaryColor: "#17232D",
-      accentColor: "#DB8A3C",
-      headline: "Estructuras que sostienen grandes ideas.",
-      subheadline: "Montaje industrial, precisión en obra y un equipo que responde cuando el proyecto lo exige.",
-      sections: ["hero", "services", "projects", "about", "contact"],
-      integrations: ["maps", "analytics"],
-      brief: {
-        objective: "Captar proyectos industriales cualificados",
-        audience: "Constructoras, ingenierías y responsables de obra que necesitan un equipo de montaje fiable",
-        valueProposition: "Montaje industrial preciso, coordinación en obra y capacidad de respuesta cuando el calendario aprieta",
-        services: ["Montaje industrial | Ejecución coordinada con los equipos y exigencias de cada obra", "Estructuras y cerramientos | Soluciones montadas con control de detalle y seguridad", "Intervenciones programadas | Planificación clara para reducir incidencias y paradas"],
-        differentiators: ["Respuesta técnica y comunicación directa en obra", "Experiencia práctica para anticipar problemas antes del montaje"],
-        tone: "experto",
-        primaryCta: "Estudiar mi proyecto",
-        aboutStory: "Montajes Noguera trabaja desde la experiencia de obra: planificación realista, comunicación con todos los oficios y responsabilidad hasta el último remate.",
-        proofPoints: ["Coordinación con dirección facultativa", "Planificación de hitos y accesos", "Seguimiento hasta la entrega"],
-        seoKeywords: ["montaje industrial Écija", "estructuras Andalucía"],
-      },
-      legalProfile: {
-        dataCategories: "Datos identificativos, profesionales y de contacto",
-        privacyPurposes: "Atender consultas técnicas y preparar ofertas solicitadas",
-        legalBasis: "Aplicación de medidas precontractuales",
-        retention: "Durante la relación y los plazos legales de responsabilidad posteriores",
-        recipients: "Asesoría y proveedores tecnológicos bajo contrato; administraciones cuando exista obligación legal",
-        internationalTransfers: "Google puede tratar datos fuera del EEE bajo garantías que deben verificarse en la implantación",
-        lastReviewedAt: "2026-08-01",
-      },
-    }, createdAt),
-    demoProject({
-      id: "demo-project-peluqueria",
-      clientId: clients[2].id,
-      name: "Web y reservas",
-      slug: "ignacio-ostos",
-      siteType: "booking",
-      template: "norte",
-      primaryColor: "#111111",
-      accentColor: "#D4A373",
-      headline: "Tu estilo empieza con una buena conversación.",
-      subheadline: "Corte, color y cuidado personal desde un espacio pensado para ti.",
-      sections: ["hero", "services", "gallery", "booking", "contact"],
-      integrations: ["maps", "instagram", "booking"],
-      legal: {
-        privacy: true,
-        legalNotice: true,
-        cookieBanner: true,
-        scriptBlocking: false,
-        formNotices: true,
-        accessibility: true,
-        security: true,
-      },
-      brief: {
-        objective: "Convertir visitas en reservas",
-        audience: "Personas de Écija y alrededores que buscan un servicio de peluquería cuidado y personal",
-        valueProposition: "Corte, color y cuidado personal desde una conversación honesta sobre lo que te favorece",
-        services: ["Corte y estilo | Una propuesta adaptada a tu cabello, rutina e identidad", "Color | Técnica y mantenimiento explicados antes de empezar", "Cuidado capilar | Tratamientos seleccionados según el estado real del cabello"],
-        differentiators: ["Escucha antes de proponer", "Criterio técnico sin resultados impersonales"],
-        tone: "cercano",
-        primaryCta: "Reservar una cita",
-        aboutStory: "El salón nace para convertir cada cita en un espacio de confianza, con tiempo para entender lo que buscas y explicar cada decisión.",
-        proofPoints: ["Diagnóstico previo", "Plan de mantenimiento claro", "Atención con cita"],
-        seoKeywords: ["peluquería Écija", "coloración Écija"],
-      },
-      legalProfile: {
-        dataCategories: "Datos identificativos, de contacto y necesarios para gestionar la cita",
-        privacyPurposes: "Responder consultas y gestionar solicitudes de cita",
-        legalBasis: "Medidas precontractuales y ejecución del servicio solicitado",
-        retention: "Mientras se gestiona la cita y durante los plazos legales aplicables",
-        recipients: "Proveedor de reservas y proveedores tecnológicos bajo contrato",
-        internationalTransfers: "Pendiente de verificar con el proveedor definitivo de reservas y Meta",
-        lastReviewedAt: "2026-08-01",
-      },
-      status: "attention",
-      complianceScore: 90,
-    }, createdAt),
-  ];
-
-  return {
-    clients,
-    projects,
-    audits: [
-      { id: "demo-audit-booking", projectId: projects[2].id, title: "Integración sin bloqueo previo", detail: "El módulo de reservas debe esperar al consentimiento antes de cargar recursos externos.", severity: "critical", status: "open", createdAt },
-      { id: "demo-audit-cookies", projectId: projects[0].id, title: "Revisar inventario de cookies", detail: "La última auditoría detectó un cambio en Google Maps.", severity: "warning", status: "open", createdAt },
-      { id: "demo-audit-pass", projectId: projects[1].id, title: "Auditoría superada", detail: "Aviso legal, privacidad, cookies, formularios y accesibilidad verificados.", severity: "success", status: "resolved", createdAt },
-    ],
-  };
+export function createEmptyStudioData(): StudioData {
+  return { clients: [], projects: [], audits: [] };
 }

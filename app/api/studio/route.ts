@@ -1,16 +1,16 @@
-import { and, desc, eq } from "drizzle-orm";
-import { ensureSchema, getDb } from "../../../db";
-import { auditEvents, clients, projects } from "../../../db/schema";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { getFounder, type Founder } from "../../../lib/founder-auth";
 import {
   assessProject,
   type BusinessBrief,
   type GeneratorProject,
   type LegalProfile,
 } from "../../../lib/site-generator";
-import { createDemoStudioData } from "../../../lib/studio-local";
+import { createAdminSupabase } from "../../../lib/supabase/server";
 
 type ClientInput = {
   id?: string;
+  revision?: number;
   name?: string;
   legalName?: string;
   taxId?: string;
@@ -26,6 +26,7 @@ type ClientInput = {
 
 type ProjectInput = {
   id?: string;
+  revision?: number;
   clientId?: string;
   name?: string;
   slug?: string;
@@ -44,34 +45,65 @@ type ProjectInput = {
   status?: string;
 };
 
-function owner(request: Request) {
-  return request.headers.get("oai-authenticated-user-email") ?? "vadim@archic.es";
-}
+type ClientRow = {
+  id: string;
+  name: string;
+  legal_name: string;
+  tax_id: string;
+  email: string;
+  phone: string;
+  address: string;
+  city: string;
+  country: string;
+  sector: string;
+  registry_data: string;
+  professional_data: string;
+  status: string;
+  revision: number;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
 
-function usesBrowserStorage() {
-  return process.env.VERCEL === "1" || process.env.ARCHIC_STORAGE_MODE === "browser";
+type ProjectRow = {
+  id: string;
+  client_id: string;
+  name: string;
+  slug: string;
+  site_type: string;
+  template: string;
+  primary_color: string;
+  accent_color: string;
+  headline: string;
+  subheadline: string;
+  hero_image_url: string;
+  sections: unknown;
+  integrations: unknown;
+  legal: unknown;
+  brief: unknown;
+  legal_profile: unknown;
+  status: string;
+  compliance_score: number;
+  github_repo_full_name: string;
+  github_repo_url: string;
+  github_default_branch: string;
+  github_last_push_at: string | null;
+  revision: number;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
 }
 
 function clean(value: unknown, fallback = "", maxLength = 5000) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : fallback;
-}
-
-function jsonArray(value: string) {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function jsonObject(value: string) {
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 function stringList(value: unknown, limit = 12) {
@@ -83,6 +115,10 @@ function stringList(value: unknown, limit = 12) {
 function booleanRecord(value: unknown) {
   if (!value || typeof value !== "object") return {};
   return Object.fromEntries(Object.entries(value).filter(([, enabled]) => typeof enabled === "boolean"));
+}
+
+function objectValue<T extends object>(value: unknown): T {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as T : {} as T;
 }
 
 function cleanBrief(value: BusinessBrief | undefined): BusinessBrief {
@@ -141,225 +177,391 @@ function generatorProject(input: ProjectInput): GeneratorProject {
   };
 }
 
-function auditInput(input: ProjectInput, client?: typeof clients.$inferSelect) {
-  return assessProject(client, generatorProject(input));
-}
-
-async function seed(email: string) {
-  const db = await getDb();
-  const existing = await db.select({ id: clients.id }).from(clients).where(eq(clients.ownerEmail, email)).limit(1);
-  if (existing.length) return;
-
-  const clientRows = [
-    {
-      id: crypto.randomUUID(), ownerEmail: email, name: "Sillas Juan y Lola",
-      legalName: "Sillas Juan y Lola, S.L.", taxId: "B12345678", email: "info@sillasjuanylola.com",
-      phone: "+34 600 123 456", address: "Calle del Comercio, 12", city: "Écija", country: "España", sector: "Eventos y alquiler",
-      registryData: "Datos de demostración: completar desde la escritura o nota registral", professionalData: "",
-    },
-    {
-      id: crypto.randomUUID(), ownerEmail: email, name: "Montajes Noguera",
-      legalName: "Montajes Noguera", taxId: "45871236R", email: "contacto@montajesnoguera.es",
-      phone: "+34 611 842 900", address: "Polígono Industrial La Campiña", city: "Écija", country: "España", sector: "Industria y montajes",
-      registryData: "", professionalData: "",
-    },
-    {
-      id: crypto.randomUUID(), ownerEmail: email, name: "Ignacio Ostos Peluquería",
-      legalName: "Ignacio Ostos", taxId: "28844119T", email: "hola@ignacioostos.es",
-      phone: "+34 622 305 118", address: "Calle Cintería, 8", city: "Écija", country: "España", sector: "Belleza y bienestar",
-      registryData: "", professionalData: "",
-    },
-  ];
-  await db.insert(clients).values(clientRows);
-
-  const projectRows = [
-    {
-      id: crypto.randomUUID(), ownerEmail: email, clientId: clientRows[0].id, name: "Catálogo y alquiler", slug: "sillas-juan-y-lola",
-      siteType: "corporate", template: "costa", primaryColor: "#8E1F2F", accentColor: "#C7A35A",
-      headline: "Celebraciones con un lugar para cada historia.", subheadline: "Alquiler de mobiliario con una colección versátil y una atención pensada para que organizar sea más sencillo.",
-      sectionsJson: JSON.stringify(["hero", "services", "catalog", "about", "contact"]),
-      integrationsJson: JSON.stringify(["maps", "whatsapp"]),
-      legalJson: JSON.stringify({ privacy: true, legalNotice: true, cookieBanner: true, scriptBlocking: true, formNotices: true, accessibility: true, security: true }),
-      briefJson: JSON.stringify({ objective: "Generar solicitudes de presupuesto para eventos", audience: "Parejas, espacios y profesionales que organizan celebraciones en Andalucía", valueProposition: "Mobiliario con carácter, asesoramiento cercano y una logística que simplifica cada montaje", services: ["Alquiler de mobiliario | Mesas, sillas y piezas auxiliares elegidas para cada celebración", "Asesoramiento de colección | Combinaciones coherentes con el espacio, el estilo y el aforo", "Entrega y recogida | Coordinación logística para llegar a tiempo y sin improvisaciones"], differentiators: ["Una colección propia que evita celebraciones intercambiables", "Acompañamiento directo desde la selección hasta la recogida"], tone: "cercano", primaryCta: "Pedir propuesta", aboutStory: "Juan y Lola unen selección, logística y atención personal para que el mobiliario acompañe la celebración sin convertirse en otra preocupación.", proofPoints: ["Colección versátil para interior y exterior", "Montajes coordinados con espacios y proveedores", "Atención local desde Écija"], seoKeywords: ["alquiler mobiliario eventos", "sillas bodas Écija"] }),
-      legalProfileJson: JSON.stringify({ dataCategories: "Datos identificativos y de contacto facilitados en el formulario", privacyPurposes: "Responder consultas y preparar presupuestos solicitados", legalBasis: "Medidas precontractuales solicitadas por la persona interesada", retention: "Durante la gestión de la solicitud y, después, durante los plazos necesarios para atender responsabilidades legales", recipients: "Proveedores tecnológicos contratados como encargados; no se prevén cesiones salvo obligación legal", internationalTransfers: "Revisar las garantías de Google Maps antes de publicar", marketing: false, minors: false, specialCategories: false, profiling: false, professionalReview: false, lastReviewedAt: "2026-08-01" }),
-      status: "ready", complianceScore: 100,
-    },
-    {
-      id: crypto.randomUUID(), ownerEmail: email, clientId: clientRows[1].id, name: "Web corporativa", slug: "montajes-noguera",
-      siteType: "corporate", template: "atlas", primaryColor: "#17232D", accentColor: "#DB8A3C",
-      headline: "Estructuras que sostienen grandes ideas.", subheadline: "Montaje industrial, precisión en obra y un equipo que responde cuando el proyecto lo exige.",
-      sectionsJson: JSON.stringify(["hero", "services", "projects", "about", "contact"]),
-      integrationsJson: JSON.stringify(["maps", "analytics"]),
-      legalJson: JSON.stringify({ privacy: true, legalNotice: true, cookieBanner: true, scriptBlocking: true, formNotices: true, accessibility: true, security: true }),
-      briefJson: JSON.stringify({ objective: "Captar proyectos industriales cualificados", audience: "Constructoras, ingenierías y responsables de obra que necesitan un equipo de montaje fiable", valueProposition: "Montaje industrial preciso, coordinación en obra y capacidad de respuesta cuando el calendario aprieta", services: ["Montaje industrial | Ejecución coordinada con los equipos y exigencias de cada obra", "Estructuras y cerramientos | Soluciones montadas con control de detalle y seguridad", "Intervenciones programadas | Planificación clara para reducir incidencias y paradas"], differentiators: ["Respuesta técnica y comunicación directa en obra", "Experiencia práctica para anticipar problemas antes del montaje"], tone: "experto", primaryCta: "Estudiar mi proyecto", aboutStory: "Montajes Noguera trabaja desde la experiencia de obra: planificación realista, comunicación con todos los oficios y responsabilidad hasta el último remate.", proofPoints: ["Coordinación con dirección facultativa", "Planificación de hitos y accesos", "Seguimiento hasta la entrega"], seoKeywords: ["montaje industrial Écija", "estructuras Andalucía"] }),
-      legalProfileJson: JSON.stringify({ dataCategories: "Datos identificativos, profesionales y de contacto", privacyPurposes: "Atender consultas técnicas y preparar ofertas solicitadas", legalBasis: "Aplicación de medidas precontractuales", retention: "Durante la relación y los plazos legales de responsabilidad posteriores", recipients: "Asesoría y proveedores tecnológicos bajo contrato; administraciones cuando exista obligación legal", internationalTransfers: "Google puede tratar datos fuera del EEE bajo las garantías que deben verificarse en la implantación", marketing: false, minors: false, specialCategories: false, profiling: false, professionalReview: false, lastReviewedAt: "2026-08-01" }),
-      status: "ready", complianceScore: 100,
-    },
-    {
-      id: crypto.randomUUID(), ownerEmail: email, clientId: clientRows[2].id, name: "Web y reservas", slug: "ignacio-ostos",
-      siteType: "booking", template: "norte", primaryColor: "#111111", accentColor: "#D4A373",
-      headline: "Tu estilo empieza con una buena conversación.", subheadline: "Corte, color y cuidado personal desde un espacio pensado para ti.",
-      sectionsJson: JSON.stringify(["hero", "services", "gallery", "booking", "contact"]),
-      integrationsJson: JSON.stringify(["maps", "instagram", "booking"]),
-      legalJson: JSON.stringify({ privacy: true, legalNotice: true, cookieBanner: true, scriptBlocking: false, formNotices: true, accessibility: true, security: true }),
-      briefJson: JSON.stringify({ objective: "Convertir visitas en reservas", audience: "Personas de Écija y alrededores que buscan un servicio de peluquería cuidado y personal", valueProposition: "Corte, color y cuidado personal desde una conversación honesta sobre lo que te favorece", services: ["Corte y estilo | Una propuesta adaptada a tu cabello, rutina e identidad", "Color | Técnica y mantenimiento explicados antes de empezar", "Cuidado capilar | Tratamientos seleccionados según el estado real del cabello"], differentiators: ["Escucha antes de proponer", "Criterio técnico sin resultados impersonales"], tone: "cercano", primaryCta: "Reservar una cita", aboutStory: "El salón nace para convertir cada cita en un espacio de confianza, con tiempo para entender lo que buscas y explicar cada decisión.", proofPoints: ["Diagnóstico previo", "Plan de mantenimiento claro", "Atención con cita"], seoKeywords: ["peluquería Écija", "coloración Écija"] }),
-      legalProfileJson: JSON.stringify({ dataCategories: "Datos identificativos, de contacto y datos necesarios para gestionar la cita", privacyPurposes: "Responder consultas y gestionar solicitudes de cita", legalBasis: "Medidas precontractuales y ejecución del servicio solicitado", retention: "Mientras se gestiona la cita y durante los plazos legales aplicables", recipients: "Proveedor de reservas y proveedores tecnológicos bajo contrato", internationalTransfers: "Pendiente de verificar con el proveedor definitivo de reservas y Meta", marketing: false, minors: false, specialCategories: false, profiling: false, professionalReview: false, lastReviewedAt: "2026-08-01" }),
-      status: "attention", complianceScore: 90,
-    },
-  ];
-  await db.insert(projects).values(projectRows);
-  await db.insert(auditEvents).values([
-    { id: crypto.randomUUID(), ownerEmail: email, projectId: projectRows[2].id, title: "Integración sin bloqueo previo", detail: "El módulo de reservas debe esperar al consentimiento antes de cargar recursos externos.", severity: "critical", status: "open" },
-    { id: crypto.randomUUID(), ownerEmail: email, projectId: projectRows[0].id, title: "Revisar inventario de cookies", detail: "La última auditoría detectó un cambio en Google Maps.", severity: "warning", status: "open" },
-    { id: crypto.randomUUID(), ownerEmail: email, projectId: projectRows[1].id, title: "Auditoría superada", detail: "Aviso legal, privacidad, cookies, formularios y accesibilidad verificados.", severity: "success", status: "resolved" },
-  ]);
-}
-
-async function snapshot(email: string) {
-  const db = await getDb();
-  const [clientRows, projectRows, auditRows] = await Promise.all([
-    db.select().from(clients).where(eq(clients.ownerEmail, email)).orderBy(desc(clients.updatedAt)),
-    db.select().from(projects).where(eq(projects.ownerEmail, email)).orderBy(desc(projects.updatedAt)),
-    db.select().from(auditEvents).where(eq(auditEvents.ownerEmail, email)).orderBy(desc(auditEvents.createdAt)).limit(50),
-  ]);
+function mapClient(row: ClientRow) {
   return {
-    clients: clientRows,
-    projects: projectRows.map((row) => ({
-      ...row,
-      sections: jsonArray(row.sectionsJson),
-      integrations: jsonArray(row.integrationsJson),
-      legal: jsonObject(row.legalJson),
-      brief: jsonObject(row.briefJson),
-      legalProfile: jsonObject(row.legalProfileJson),
-    })),
-    audits: auditRows,
+    id: row.id,
+    name: row.name,
+    legalName: row.legal_name,
+    taxId: row.tax_id,
+    email: row.email,
+    phone: row.phone,
+    address: row.address,
+    city: row.city,
+    country: row.country,
+    sector: row.sector,
+    registryData: row.registry_data,
+    professionalData: row.professional_data,
+    status: row.status,
+    revision: row.revision,
+    createdBy: row.created_by ?? "",
+    updatedBy: row.updated_by ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
-export async function GET(request: Request) {
+function mapProject(row: ProjectRow) {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    name: row.name,
+    slug: row.slug,
+    siteType: row.site_type,
+    template: row.template,
+    primaryColor: row.primary_color,
+    accentColor: row.accent_color,
+    headline: row.headline,
+    subheadline: row.subheadline,
+    heroImageUrl: row.hero_image_url,
+    sections: stringList(row.sections, 20),
+    integrations: stringList(row.integrations, 20),
+    legal: booleanRecord(row.legal),
+    brief: objectValue<BusinessBrief>(row.brief),
+    legalProfile: objectValue<LegalProfile>(row.legal_profile),
+    status: row.status,
+    complianceScore: row.compliance_score,
+    githubRepoFullName: row.github_repo_full_name,
+    githubRepoUrl: row.github_repo_url,
+    githubDefaultBranch: row.github_default_branch,
+    githubLastPushAt: row.github_last_push_at ?? "",
+    revision: row.revision,
+    createdBy: row.created_by ?? "",
+    updatedBy: row.updated_by ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function projectInputFromRow(row: ProjectRow): ProjectInput {
+  const mapped = mapProject(row);
+  return {
+    ...mapped,
+    brief: mapped.brief,
+    legalProfile: mapped.legalProfile,
+  };
+}
+
+function clientValues(input: ClientInput) {
+  return {
+    name: clean(input.name),
+    legal_name: clean(input.legalName),
+    tax_id: clean(input.taxId),
+    email: clean(input.email, "", 320),
+    phone: clean(input.phone, "", 120),
+    address: clean(input.address),
+    city: clean(input.city, "", 240),
+    country: clean(input.country, "España", 240),
+    sector: clean(input.sector, "Servicios", 240),
+    registry_data: clean(input.registryData),
+    professional_data: clean(input.professionalData),
+  };
+}
+
+function projectValues(input: ProjectInput) {
+  const normalized = generatorProject(input);
+  return {
+    normalized,
+    values: {
+      client_id: clean(input.clientId),
+      name: clean(input.name),
+      slug: clean(input.slug, "nuevo-proyecto", 160),
+      site_type: normalized.siteType,
+      template: normalized.template,
+      primary_color: normalized.primaryColor,
+      accent_color: normalized.accentColor,
+      headline: normalized.headline,
+      subheadline: normalized.subheadline,
+      hero_image_url: normalized.heroImageUrl,
+      sections: normalized.sections,
+      integrations: normalized.integrations,
+      legal: normalized.legal,
+      brief: normalized.brief,
+      legal_profile: normalized.legalProfile,
+    },
+  };
+}
+
+function sameOrigin(request: Request) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
   try {
-    if (usesBrowserStorage()) {
-      return Response.json({ ...createDemoStudioData(), storageMode: "browser" });
-    }
-    const email = owner(request);
-    await ensureSchema();
-    await seed(email);
-    return Response.json(await snapshot(email));
+    const expectedHost = request.headers.get("x-forwarded-host")
+      || request.headers.get("host")
+      || new URL(request.url).host;
+    return new URL(origin).host === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+function databaseError(error: { message: string; code?: string } | null, fallback: string) {
+  if (!error) return;
+  if (error.code === "42P01" || error.code === "PGRST205") {
+    throw new HttpError("La base compartida de Archic Studio aún no está inicializada.", 503);
+  }
+  throw new Error(`${fallback}: ${error.message}`);
+}
+
+async function snapshot(admin: SupabaseClient) {
+  const [clientResult, projectResult, auditResult, memberResult, activityResult] = await Promise.all([
+    admin.from("clients").select("*").order("updated_at", { ascending: false }),
+    admin.from("projects").select("*").order("updated_at", { ascending: false }),
+    admin.from("audit_events").select("*").order("created_at", { ascending: false }).limit(60),
+    admin.from("studio_members").select("user_id,email,display_name,slot,color,created_at").order("slot"),
+    admin.from("activity_events").select("id,actor_id,action,entity_type,entity_id,entity_name,detail,created_at").order("created_at", { ascending: false }).limit(40),
+  ]);
+  databaseError(clientResult.error, "No se pudieron cargar los clientes");
+  databaseError(projectResult.error, "No se pudieron cargar los proyectos");
+  databaseError(auditResult.error, "No se pudieron cargar las auditorías");
+  databaseError(memberResult.error, "No se pudo cargar el equipo");
+  databaseError(activityResult.error, "No se pudo cargar la actividad");
+
+  return {
+    clients: (clientResult.data as ClientRow[]).map(mapClient),
+    projects: (projectResult.data as ProjectRow[]).map(mapProject),
+    audits: (auditResult.data ?? []).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      title: row.title,
+      detail: row.detail,
+      severity: row.severity,
+      status: row.status,
+      createdBy: row.created_by ?? "",
+      createdAt: row.created_at,
+    })),
+    members: (memberResult.data ?? []).map((row) => ({
+      id: row.user_id,
+      email: row.email,
+      name: row.display_name,
+      slot: row.slot,
+      color: row.color,
+      createdAt: row.created_at,
+    })),
+    activities: (activityResult.data ?? []).map((row) => ({
+      id: row.id,
+      actorId: row.actor_id,
+      action: row.action,
+      entityType: row.entity_type,
+      entityId: row.entity_id ?? "",
+      entityName: row.entity_name,
+      detail: row.detail,
+      createdAt: row.created_at,
+    })),
+    storageMode: "shared" as const,
+  };
+}
+
+async function recordActivity(
+  admin: SupabaseClient,
+  founder: Founder,
+  action: string,
+  entityType: string,
+  entityId: string,
+  entityName: string,
+  detail: string,
+) {
+  const { error } = await admin.from("activity_events").insert({
+    actor_id: founder.id,
+    action,
+    entity_type: entityType,
+    entity_id: entityId || null,
+    entity_name: clean(entityName, "", 240),
+    detail: clean(detail, "", 500),
+  });
+  databaseError(error, "No se pudo registrar la actividad");
+}
+
+async function replaceProjectAudits(
+  admin: SupabaseClient,
+  founder: Founder,
+  projectId: string,
+  assessment: ReturnType<typeof assessProject>,
+  includeSuccess = false,
+) {
+  const { error: deleteError } = await admin
+    .from("audit_events")
+    .delete()
+    .eq("project_id", projectId)
+    .eq("status", "open");
+  databaseError(deleteError, "No se pudieron actualizar las auditorías");
+
+  const findings = [...assessment.blockers, ...assessment.warnings];
+  const rows: Array<{
+    project_id: string;
+    title: string;
+    detail: string;
+    severity: string;
+    status: string;
+    created_by: string;
+  }> = findings.map((finding) => ({
+    project_id: projectId,
+    title: finding.label,
+    detail: finding.detail,
+    severity: finding.severity,
+    status: "open",
+    created_by: founder.id,
+  }));
+  if (!rows.length && includeSuccess) {
+    rows.push({
+      project_id: projectId,
+      title: "Auditoría de configuración superada",
+      detail: `No quedan hallazgos en los datos configurados (${assessment.score}/100). Falta verificar el despliegue real.`,
+      severity: "success",
+      status: "resolved",
+      created_by: founder.id,
+    });
+  }
+  if (rows.length) {
+    const { error } = await admin.from("audit_events").insert(rows);
+    databaseError(error, "No se pudieron registrar los hallazgos");
+  }
+}
+
+async function authenticatedContext() {
+  const founder = await getFounder();
+  if (!founder) throw new HttpError("Inicia sesión con una cuenta de fundador.", 401);
+  return { founder, admin: createAdminSupabase() };
+}
+
+export async function GET() {
+  try {
+    const { admin } = await authenticatedContext();
+    return Response.json(await snapshot(admin), {
+      headers: { "cache-control": "private, no-store" },
+    });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "No se pudo cargar Archic Studio." }, { status: 500 });
+    const status = error instanceof HttpError ? error.status : 500;
+    return Response.json({ error: error instanceof Error ? error.message : "No se pudo cargar Archic Studio." }, { status });
   }
 }
 
 export async function POST(request: Request) {
   try {
-    if (usesBrowserStorage()) {
-      return Response.json(
-        { error: "En este despliegue los cambios se guardan de forma privada en el navegador." },
-        { status: 409 },
-      );
-    }
-    const email = owner(request);
-    await ensureSchema();
+    if (!sameOrigin(request)) throw new HttpError("Solicitud rechazada.", 403);
+    const { founder, admin } = await authenticatedContext();
     const body = await request.json() as { action?: string; client?: ClientInput; project?: ProjectInput; id?: string };
-    const db = await getDb();
-
     let savedProjectId = "";
+
     if (body.action === "createClient") {
       const input = body.client ?? {};
-      if (!clean(input.name)) return Response.json({ error: "El nombre comercial es obligatorio." }, { status: 400 });
-      await db.insert(clients).values({
-        id: crypto.randomUUID(), ownerEmail: email, name: clean(input.name), legalName: clean(input.legalName),
-        taxId: clean(input.taxId), email: clean(input.email), phone: clean(input.phone), address: clean(input.address),
-        city: clean(input.city), country: clean(input.country, "España"), sector: clean(input.sector, "Servicios"),
-        registryData: clean(input.registryData), professionalData: clean(input.professionalData),
-      });
+      if (!clean(input.name)) throw new HttpError("El nombre comercial es obligatorio.", 400);
+      const { data, error } = await admin.from("clients").insert({
+        ...clientValues(input),
+        created_by: founder.id,
+        updated_by: founder.id,
+      }).select("id,name").single();
+      databaseError(error, "No se pudo crear el cliente");
+      if (!data) throw new Error("La base no devolvió el cliente creado.");
+      await recordActivity(admin, founder, "creó", "client", data.id, data.name, "Añadió un trabajo real al Studio");
     } else if (body.action === "updateClient") {
       const input = body.client ?? {};
-      if (!input.id || !clean(input.name)) return Response.json({ error: "Cliente inválido." }, { status: 400 });
-      await db.update(clients).set({
-        name: clean(input.name), legalName: clean(input.legalName), taxId: clean(input.taxId),
-        email: clean(input.email), phone: clean(input.phone), address: clean(input.address),
-        city: clean(input.city), country: clean(input.country, "España"), sector: clean(input.sector, "Servicios"),
-        registryData: clean(input.registryData), professionalData: clean(input.professionalData), updatedAt: new Date().toISOString(),
-      }).where(and(eq(clients.id, input.id), eq(clients.ownerEmail, email)));
-      const [updatedClient] = await db.select().from(clients).where(and(eq(clients.id, input.id), eq(clients.ownerEmail, email))).limit(1);
-      const relatedProjects = await db.select().from(projects).where(and(eq(projects.clientId, input.id), eq(projects.ownerEmail, email)));
-      for (const row of relatedProjects) {
-        const relatedInput: ProjectInput = { ...row, sections: jsonArray(row.sectionsJson), integrations: jsonArray(row.integrationsJson), legal: jsonObject(row.legalJson) as Record<string, boolean>, brief: jsonObject(row.briefJson) as BusinessBrief, legalProfile: jsonObject(row.legalProfileJson) as LegalProfile };
-        const audit = auditInput(relatedInput, updatedClient);
-        await db.update(projects).set({ complianceScore: audit.score, status: audit.status, updatedAt: new Date().toISOString() }).where(and(eq(projects.id, row.id), eq(projects.ownerEmail, email)));
+      if (!input.id || !clean(input.name)) throw new HttpError("Cliente inválido.", 400);
+      const revision = Number.isInteger(input.revision) ? Number(input.revision) : 1;
+      const { data, error } = await admin.from("clients").update({
+        ...clientValues(input),
+        revision: revision + 1,
+        updated_by: founder.id,
+        updated_at: new Date().toISOString(),
+      }).eq("id", input.id).eq("revision", revision).select("*").maybeSingle();
+      databaseError(error, "No se pudo actualizar el cliente");
+      if (!data) throw new HttpError("El otro fundador ha actualizado este cliente. Recargamos la versión más reciente para que no pierdas cambios.", 409);
+
+      const updatedClient = mapClient(data as ClientRow);
+      const { data: related, error: relatedError } = await admin.from("projects").select("*").eq("client_id", input.id);
+      databaseError(relatedError, "No se pudieron revisar los proyectos del cliente");
+      for (const row of (related ?? []) as ProjectRow[]) {
+        const projectInput = projectInputFromRow(row);
+        const assessment = assessProject(updatedClient, generatorProject(projectInput));
+        const { error: projectError } = await admin.from("projects").update({
+          compliance_score: assessment.score,
+          status: assessment.status,
+          revision: row.revision + 1,
+          updated_by: founder.id,
+          updated_at: new Date().toISOString(),
+        }).eq("id", row.id).eq("revision", row.revision);
+        databaseError(projectError, "No se pudo recalcular el proyecto");
+        await replaceProjectAudits(admin, founder, row.id, assessment);
       }
+      await recordActivity(admin, founder, "actualizó", "client", input.id, updatedClient.name, "Actualizó la ficha comercial o legal");
     } else if (body.action === "createProject") {
       const input = body.project ?? {};
-      if (!input.clientId || !clean(input.name)) return Response.json({ error: "Cliente y nombre del proyecto son obligatorios." }, { status: 400 });
-      const [client] = await db.select().from(clients).where(and(eq(clients.id, input.clientId), eq(clients.ownerEmail, email))).limit(1);
-      if (!client) return Response.json({ error: "Cliente no encontrado." }, { status: 404 });
-      const projectId = crypto.randomUUID();
-      savedProjectId = projectId;
-      const normalized = generatorProject(input);
-      const audit = assessProject(client, normalized);
-      await db.insert(projects).values({
-        id: projectId, ownerEmail: email, clientId: input.clientId, name: clean(input.name), slug: clean(input.slug, "nuevo-proyecto"),
-        siteType: normalized.siteType, template: normalized.template,
-        primaryColor: normalized.primaryColor, accentColor: normalized.accentColor,
-        headline: normalized.headline, subheadline: normalized.subheadline, heroImageUrl: normalized.heroImageUrl,
-        sectionsJson: JSON.stringify(normalized.sections), integrationsJson: JSON.stringify(normalized.integrations),
-        legalJson: JSON.stringify(normalized.legal), briefJson: JSON.stringify(normalized.brief),
-        legalProfileJson: JSON.stringify(normalized.legalProfile), status: audit.status, complianceScore: audit.score,
-      });
-      const findings = [...audit.blockers, ...audit.warnings];
-      if (findings.length) {
-        await db.insert(auditEvents).values(findings.map((finding) => ({ id: crypto.randomUUID(), ownerEmail: email, projectId, title: finding.label, detail: finding.detail, severity: finding.severity, status: "open" })));
-      }
+      if (!input.clientId || !clean(input.name)) throw new HttpError("Cliente y nombre del proyecto son obligatorios.", 400);
+      const { data: clientRow, error: clientError } = await admin.from("clients").select("*").eq("id", input.clientId).maybeSingle();
+      databaseError(clientError, "No se pudo comprobar el cliente");
+      if (!clientRow) throw new HttpError("Cliente no encontrado.", 404);
+      const { normalized, values } = projectValues(input);
+      const assessment = assessProject(mapClient(clientRow as ClientRow), normalized);
+      const { data, error } = await admin.from("projects").insert({
+        ...values,
+        status: assessment.status,
+        compliance_score: assessment.score,
+        created_by: founder.id,
+        updated_by: founder.id,
+      }).select("id,name").single();
+      databaseError(error, "No se pudo crear el proyecto");
+      if (!data) throw new Error("La base no devolvió el proyecto creado.");
+      savedProjectId = data.id;
+      await replaceProjectAudits(admin, founder, data.id, assessment);
+      await recordActivity(admin, founder, "creó", "project", data.id, data.name, "Inició un nuevo proyecto real");
     } else if (body.action === "updateProject") {
       const input = body.project ?? {};
-      if (!input.id || !input.clientId) return Response.json({ error: "Proyecto inválido." }, { status: 400 });
-      const [client] = await db.select().from(clients).where(and(eq(clients.id, input.clientId), eq(clients.ownerEmail, email))).limit(1);
-      if (!client) return Response.json({ error: "Cliente no encontrado." }, { status: 404 });
-      const normalized = generatorProject(input);
-      const audit = assessProject(client, normalized);
-      savedProjectId = input.id;
-      await db.update(projects).set({
-        clientId: input.clientId, name: clean(input.name), slug: clean(input.slug), siteType: normalized.siteType,
-        template: normalized.template, primaryColor: normalized.primaryColor, accentColor: normalized.accentColor,
-        headline: normalized.headline, subheadline: normalized.subheadline, heroImageUrl: normalized.heroImageUrl,
-        sectionsJson: JSON.stringify(normalized.sections), integrationsJson: JSON.stringify(normalized.integrations),
-        legalJson: JSON.stringify(normalized.legal), briefJson: JSON.stringify(normalized.brief),
-        legalProfileJson: JSON.stringify(normalized.legalProfile), status: audit.status,
-        complianceScore: audit.score, updatedAt: new Date().toISOString(),
-      }).where(and(eq(projects.id, input.id), eq(projects.ownerEmail, email)));
-      await db.delete(auditEvents).where(and(eq(auditEvents.projectId, input.id), eq(auditEvents.ownerEmail, email), eq(auditEvents.status, "open")));
-      const findings = [...audit.blockers, ...audit.warnings];
-      if (findings.length) {
-        await db.insert(auditEvents).values(findings.map((finding) => ({ id: crypto.randomUUID(), ownerEmail: email, projectId: input.id!, title: finding.label, detail: finding.detail, severity: finding.severity, status: "open" })));
-      }
+      if (!input.id || !input.clientId) throw new HttpError("Proyecto inválido.", 400);
+      const { data: clientRow, error: clientError } = await admin.from("clients").select("*").eq("id", input.clientId).maybeSingle();
+      databaseError(clientError, "No se pudo comprobar el cliente");
+      if (!clientRow) throw new HttpError("Cliente no encontrado.", 404);
+      const revision = Number.isInteger(input.revision) ? Number(input.revision) : 1;
+      const { normalized, values } = projectValues(input);
+      const assessment = assessProject(mapClient(clientRow as ClientRow), normalized);
+      const { data, error } = await admin.from("projects").update({
+        ...values,
+        status: assessment.status,
+        compliance_score: assessment.score,
+        revision: revision + 1,
+        updated_by: founder.id,
+        updated_at: new Date().toISOString(),
+      }).eq("id", input.id).eq("revision", revision).select("id,name").maybeSingle();
+      databaseError(error, "No se pudo guardar el proyecto");
+      if (!data) throw new HttpError("El otro fundador ha guardado una versión más reciente. Recargamos sus cambios antes de continuar.", 409);
+      savedProjectId = data.id;
+      await replaceProjectAudits(admin, founder, data.id, assessment);
+      await recordActivity(admin, founder, "editó", "project", data.id, data.name, "Guardó una nueva revisión del proyecto");
     } else if (body.action === "runAudit") {
-      if (!body.id) return Response.json({ error: "Proyecto inválido." }, { status: 400 });
-      const [row] = await db.select().from(projects).where(and(eq(projects.id, body.id), eq(projects.ownerEmail, email))).limit(1);
-      if (!row) return Response.json({ error: "Proyecto no encontrado." }, { status: 404 });
-      const [client] = await db.select().from(clients).where(and(eq(clients.id, row.clientId), eq(clients.ownerEmail, email))).limit(1);
-      const input: ProjectInput = { ...row, sections: jsonArray(row.sectionsJson), integrations: jsonArray(row.integrationsJson), legal: jsonObject(row.legalJson) as Record<string, boolean>, brief: jsonObject(row.briefJson) as BusinessBrief, legalProfile: jsonObject(row.legalProfileJson) as LegalProfile };
-      const audit = auditInput(input, client);
-      await db.update(projects).set({ complianceScore: audit.score, status: audit.status, updatedAt: new Date().toISOString() }).where(eq(projects.id, row.id));
-      await db.delete(auditEvents).where(and(eq(auditEvents.projectId, row.id), eq(auditEvents.ownerEmail, email), eq(auditEvents.status, "open")));
-      const findings = [...audit.blockers, ...audit.warnings];
-      await db.insert(auditEvents).values(findings.length ? findings.map((finding) => ({
-        id: crypto.randomUUID(), ownerEmail: email, projectId: row.id,
-        title: finding.label, detail: finding.detail,
-        severity: finding.severity, status: "open",
-      })) : [{
-        id: crypto.randomUUID(), ownerEmail: email, projectId: row.id,
-        title: "Auditoría de configuración superada", detail: `No quedan hallazgos en los datos configurados (${audit.score}/100). Falta verificar el despliegue real.`,
-        severity: "success", status: "resolved",
-      }]);
+      if (!body.id) throw new HttpError("Proyecto inválido.", 400);
+      const { data: row, error } = await admin.from("projects").select("*").eq("id", body.id).maybeSingle();
+      databaseError(error, "No se pudo cargar el proyecto");
+      if (!row) throw new HttpError("Proyecto no encontrado.", 404);
+      const projectRow = row as ProjectRow;
+      const { data: clientRow, error: clientError } = await admin.from("clients").select("*").eq("id", projectRow.client_id).maybeSingle();
+      databaseError(clientError, "No se pudo cargar el cliente");
+      if (!clientRow) throw new HttpError("Cliente no encontrado.", 404);
+      const assessment = assessProject(mapClient(clientRow as ClientRow), generatorProject(projectInputFromRow(projectRow)));
+      const { error: updateError } = await admin.from("projects").update({
+        compliance_score: assessment.score,
+        status: assessment.status,
+        revision: projectRow.revision + 1,
+        updated_by: founder.id,
+        updated_at: new Date().toISOString(),
+      }).eq("id", body.id).eq("revision", projectRow.revision);
+      databaseError(updateError, "No se pudo guardar la auditoría");
+      await replaceProjectAudits(admin, founder, body.id, assessment, true);
+      await recordActivity(admin, founder, "auditó", "project", body.id, projectRow.name, `Resultado ${assessment.score}/100`);
     } else if (body.action === "deleteProject") {
-      if (body.id) await db.delete(projects).where(and(eq(projects.id, body.id), eq(projects.ownerEmail, email)));
+      if (!body.id) throw new HttpError("Proyecto inválido.", 400);
+      const { data: project, error: readError } = await admin.from("projects").select("id,name").eq("id", body.id).maybeSingle();
+      databaseError(readError, "No se pudo comprobar el proyecto");
+      if (!project) throw new HttpError("Proyecto no encontrado.", 404);
+      const { error } = await admin.from("projects").delete().eq("id", body.id);
+      databaseError(error, "No se pudo eliminar el proyecto");
+      await recordActivity(admin, founder, "eliminó", "project", project.id, project.name, "Retiró el proyecto del espacio compartido");
     } else {
-      return Response.json({ error: "Acción no reconocida." }, { status: 400 });
+      throw new HttpError("Acción no reconocida.", 400);
     }
 
-    return Response.json({ ...(await snapshot(email)), ...(savedProjectId ? { savedProjectId } : {}) });
+    return Response.json({ ...(await snapshot(admin)), ...(savedProjectId ? { savedProjectId } : {}) }, {
+      headers: { "cache-control": "private, no-store" },
+    });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "No se pudo guardar el cambio." }, { status: 500 });
+    const status = error instanceof HttpError ? error.status : 500;
+    return Response.json({ error: error instanceof Error ? error.message : "No se pudo guardar el cambio." }, { status });
   }
 }

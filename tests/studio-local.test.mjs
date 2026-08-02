@@ -3,49 +3,55 @@ import test from "node:test";
 
 import {
   applyLocalStudioAction,
-  createDemoStudioData,
+  createEmptyStudioData,
   parseLocalStudioData,
 } from "../lib/studio-local.ts";
 
-test("the Vercel browser store starts with the three sector examples", () => {
-  const data = createDemoStudioData();
-  assert.equal(data.clients.length, 3);
-  assert.equal(data.projects.length, 3);
-  assert.equal(data.audits.length, 3);
-  assert.deepEqual(
-    data.projects.map((project) => project.template),
-    ["costa", "atlas", "norte"],
-  );
+test("the Studio starts empty instead of inventing clients or projects", () => {
+  assert.deepEqual(createEmptyStudioData(), {
+    clients: [],
+    projects: [],
+    audits: [],
+  });
 });
 
-test("local actions persist a client and a project without a server database", () => {
-  const initial = createDemoStudioData();
+test("the pure reducer can add a real client and its first project", () => {
+  const initial = createEmptyStudioData();
   const withClient = applyLocalStudioAction(initial, {
     action: "createClient",
     client: {
-      name: "Taller Horizonte",
-      legalName: "Taller Horizonte, S.L.",
+      name: "Empresa real",
+      legalName: "Empresa real, S.L.",
       taxId: "B87654321",
-      email: "hola@tallerhorizonte.es",
-      address: "Calle Nueva, 4",
+      email: "hola@empresa-real.es",
+      address: "Calle Principal, 4",
       city: "Écija",
       country: "España",
-      sector: "Arquitectura",
+      sector: "Servicios",
     },
   });
   const client = withClient.clients[0];
-  assert.equal(client.name, "Taller Horizonte");
+  assert.equal(client.name, "Empresa real");
   assert.equal(client.phone, "");
   assert.equal(client.registryData, "");
 
   const result = applyLocalStudioAction(withClient, {
     action: "createProject",
     project: {
-      ...initial.projects[0],
-      id: undefined,
       clientId: client.id,
       name: "Nueva web corporativa",
-      slug: "taller-horizonte",
+      slug: "empresa-real",
+      siteType: "corporate",
+      template: "costa",
+      primaryColor: "#0B1628",
+      accentColor: "#B7924C",
+      headline: "Una propuesta real",
+      subheadline: "Contenido validado con la empresa.",
+      sections: ["hero", "services", "about", "contact"],
+      integrations: [],
+      legal: {},
+      brief: {},
+      legalProfile: {},
     },
   });
   assert.ok(result.savedProjectId);
@@ -53,8 +59,8 @@ test("local actions persist a client and a project without a server database", (
   assert.equal(result.projects[0].name, "Nueva web corporativa");
 });
 
-test("stored browser data is accepted only with the expected collections", () => {
-  const data = createDemoStudioData();
+test("stored data is accepted only with the expected collections", () => {
+  const data = createEmptyStudioData();
   assert.deepEqual(parseLocalStudioData(JSON.stringify(data)), data);
   assert.equal(parseLocalStudioData("{}"), null);
   assert.equal(parseLocalStudioData("not-json"), null);

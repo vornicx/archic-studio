@@ -1,16 +1,11 @@
-import { and, eq } from "drizzle-orm";
-import { ensureSchema, getDb } from "../../../db";
-import { clients, projects } from "../../../db/schema";
+import { getFounder } from "../../../lib/founder-auth";
 import { runtimeEnv } from "../../../lib/runtime-env";
 import { assessProject, buildSiteBundle, type GeneratorClient, type GeneratorProject } from "../../../lib/site-generator";
-import { normalizeGeneratorProject, type StudioClient, type StudioProject } from "../../../lib/studio-local";
+import type { StudioClient } from "../../../lib/studio-local";
+import { createAdminSupabase } from "../../../lib/supabase/server";
 
 type GithubUser = { login: string; name?: string | null; avatar_url?: string; html_url: string };
 type GithubRepo = { full_name: string; html_url: string; default_branch: string; private: boolean };
-
-function ownerEmail(request: Request) {
-  return request.headers.get("oai-authenticated-user-email") ?? "vadim@archic.es";
-}
 
 async function githubConfig() {
   const runtime = await runtimeEnv();
@@ -92,6 +87,19 @@ function repoName(value: unknown) {
     .slice(0, 80);
 }
 
+function sameOrigin(request: Request) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    const expectedHost = request.headers.get("x-forwarded-host")
+      || request.headers.get("host")
+      || new URL(request.url).host;
+    return new URL(origin).host === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
 async function upsertFile(token: string, repo: string, path: string, content: string, branch?: string) {
   let sha = "";
   try {
@@ -112,6 +120,8 @@ async function upsertFile(token: string, repo: string, path: string, content: st
 }
 
 export async function GET() {
+  const founder = await getFounder();
+  if (!founder) return Response.json({ error: "Inicia sesión con una cuenta de fundador." }, { status: 401 });
   const config = await githubConfig();
   if (!config.token) {
     return Response.json({ connected: false, owner: config.owner, reason: "missing_token", requiresPublishKey: config.requiresPublishKey });
@@ -129,6 +139,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    if (!sameOrigin(request)) return Response.json({ error: "Solicitud rechazada." }, { status: 403 });
+    const founder = await getFounder();
+    if (!founder) return Response.json({ error: "Inicia sesión con una cuenta de fundador." }, { status: 401 });
     const config = await githubConfig();
     if (!config.token) {
       return Response.json({ error: "GitHub todavía no está conectado. Añade GITHUB_TOKEN como secreto del Studio." }, { status: 503 });
@@ -146,52 +159,48 @@ export async function POST(request: Request) {
       projectId?: string;
       repoName?: string;
       visibility?: "private" | "public";
-      project?: Partial<StudioProject>;
-      client?: Partial<StudioClient>;
     };
-    const projectId = body.project?.id || body.projectId;
+    const projectId = body.projectId;
     if (!projectId) return Response.json({ error: "Proyecto no válido." }, { status: 400 });
     const name = repoName(body.repoName);
     if (!name) return Response.json({ error: "Escribe un nombre válido para el repositorio." }, { status: 400 });
 
-    let client: GeneratorClient;
-    let generatedProject: GeneratorProject;
-    let persistence: {
-      db: Awaited<ReturnType<typeof getDb>>;
-      email: string;
-      projectId: string;
-    } | null = null;
-
-    if (body.project && body.client) {
-      client = publishClient(body.client);
-      generatedProject = normalizeGeneratorProject(body.project);
-    } else {
-      await ensureSchema();
-      const email = ownerEmail(request);
-      const db = await getDb();
-      const [project] = await db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.ownerEmail, email))).limit(1);
-      if (!project) return Response.json({ error: "Proyecto no encontrado." }, { status: 404 });
-      const [storedClient] = await db.select().from(clients).where(and(eq(clients.id, project.clientId), eq(clients.ownerEmail, email))).limit(1);
-      if (!storedClient) return Response.json({ error: "Cliente no encontrado." }, { status: 404 });
-      client = storedClient;
-      generatedProject = {
-        name: project.name,
-        slug: project.slug,
-        siteType: project.siteType,
-        template: project.template,
-        primaryColor: project.primaryColor,
-        accentColor: project.accentColor,
-        headline: project.headline,
-        subheadline: project.subheadline,
-        heroImageUrl: project.heroImageUrl,
-        sections: JSON.parse(project.sectionsJson) as string[],
-        integrations: JSON.parse(project.integrationsJson) as string[],
-        legal: JSON.parse(project.legalJson) as Record<string, boolean>,
-        brief: JSON.parse(project.briefJson),
-        legalProfile: JSON.parse(project.legalProfileJson),
-      };
-      persistence = { db, email, projectId: project.id };
-    }
+    const admin = createAdminSupabase();
+    const { data: project, error: projectError } = await admin.from("projects").select("*").eq("id", projectId).maybeSingle();
+    if (projectError) throw new Error(projectError.message);
+    if (!project) return Response.json({ error: "Proyecto no encontrado." }, { status: 404 });
+    const { data: storedClient, error: clientError } = await admin.from("clients").select("*").eq("id", project.client_id).maybeSingle();
+    if (clientError) throw new Error(clientError.message);
+    if (!storedClient) return Response.json({ error: "Cliente no encontrado." }, { status: 404 });
+    const client: GeneratorClient = publishClient({
+      name: storedClient.name,
+      legalName: storedClient.legal_name,
+      taxId: storedClient.tax_id,
+      email: storedClient.email,
+      phone: storedClient.phone,
+      address: storedClient.address,
+      city: storedClient.city,
+      country: storedClient.country,
+      sector: storedClient.sector,
+      registryData: storedClient.registry_data,
+      professionalData: storedClient.professional_data,
+    });
+    const generatedProject: GeneratorProject = {
+      name: project.name,
+      slug: project.slug,
+      siteType: project.site_type,
+      template: project.template,
+      primaryColor: project.primary_color,
+      accentColor: project.accent_color,
+      headline: project.headline,
+      subheadline: project.subheadline,
+      heroImageUrl: project.hero_image_url,
+      sections: Array.isArray(project.sections) ? project.sections : [],
+      integrations: Array.isArray(project.integrations) ? project.integrations : [],
+      legal: project.legal && typeof project.legal === "object" ? project.legal : {},
+      brief: project.brief && typeof project.brief === "object" ? project.brief : {},
+      legalProfile: project.legal_profile && typeof project.legal_profile === "object" ? project.legal_profile : {},
+    };
 
     const audit = assessProject(client, generatedProject);
     if (audit.blockers.length) {
@@ -242,21 +251,34 @@ export async function POST(request: Request) {
     }
 
     const pushedAt = new Date().toISOString();
-    if (persistence) {
-      await persistence.db.update(projects).set({
-        githubRepoFullName: repo.full_name,
-        githubRepoUrl: repo.html_url,
-        githubDefaultBranch: branch,
-        githubLastPushAt: pushedAt,
-        updatedAt: pushedAt,
-      }).where(and(eq(projects.id, persistence.projectId), eq(projects.ownerEmail, persistence.email)));
+    const { data: persistedProject, error: persistenceError } = await admin.from("projects").update({
+      github_repo_full_name: repo.full_name,
+      github_repo_url: repo.html_url,
+      github_default_branch: branch,
+      github_last_push_at: pushedAt,
+      revision: Number(project.revision || 1) + 1,
+      updated_by: founder.id,
+      updated_at: pushedAt,
+    }).eq("id", project.id).eq("revision", project.revision).select("revision").maybeSingle();
+    if (persistenceError) throw new Error(persistenceError.message);
+    if (!persistedProject) {
+      return Response.json({ error: "El proyecto cambió mientras se publicaba. GitHub ya está actualizado; recarga el Studio antes de volver a guardar." }, { status: 409 });
     }
+    await admin.from("activity_events").insert({
+      actor_id: founder.id,
+      action: "publicó",
+      entity_type: "project",
+      entity_id: project.id,
+      entity_name: project.name,
+      detail: `Actualizó ${repo.full_name} en GitHub`,
+    });
 
     return Response.json({
       ok: true,
       created,
       repository: { fullName: repo.full_name, url: repo.html_url, branch, private: repo.private },
       pushedAt,
+      revision: persistedProject.revision,
       files: Object.keys(files),
     });
   } catch (error) {

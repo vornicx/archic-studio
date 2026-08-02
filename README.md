@@ -2,12 +2,16 @@
 
 Herramienta privada de Archic para crear webs con una base visual sólida,
 controles de consentimiento, documentos legales configurables y publicación
-directa en GitHub.
+directa en GitHub. Está diseñada como un único espacio compartido para sus dos
+fundadores, cada uno con su propia cuenta.
 
 ## Qué incluye
 
 - fichas de cliente con datos legales;
-- proyectos y auditorías persistentes en Cloudflare D1 o, en Vercel, en el navegador privado del usuario;
+- dos cuentas personales activadas mediante invitaciones distintas de un solo uso;
+- clientes, proyectos y auditorías en un Postgres compartido, sin datos de demostración;
+- presencia, actividad y sincronización en vivo mediante Supabase Realtime;
+- control optimista de revisiones para impedir que dos guardados simultáneos se sobrescriban en silencio;
 - constructor en seis pasos con briefing empresarial obligatorio;
 - tres direcciones creativas: Origen, Forja y Atelier;
 - público, objetivo, propuesta de valor, servicios, diferenciales, pruebas, voz y CTA propios;
@@ -49,10 +53,27 @@ Next.js, que produce la carpeta `.next` esperada por la plataforma. Fuera de
 Vercel conserva el build Vinext/Cloudflare y su validación de Worker.
 
 No configures manualmente otro directorio de salida en Vercel: deja el preset
-Next.js y la salida predeterminada. En este modo, clientes, proyectos y
-auditorías se guardan en `localStorage`; sobreviven a recargas en el mismo
-navegador, pero no se sincronizan entre dispositivos. Para persistencia
-centralizada y multiusuario, despliega el destino Cloudflare con su binding D1.
+Next.js y la salida predeterminada. El proyecto no utiliza `localStorage` como
+base de datos: clientes, proyectos, auditorías, miembros y actividad viven en
+Supabase y se comparten entre los dos navegadores.
+
+### Base compartida y dos cuentas
+
+1. Instala Supabase desde Vercel Marketplace y conéctalo a los entornos de
+   producción, preview y desarrollo.
+2. Ejecuta `vercel env pull .env.local` y después
+   `npm run db:migrate:supabase` para crear las tablas, índices y políticas RLS.
+3. Ejecuta `npm run auth:create-invites`. Añade únicamente los dos hashes como
+   `ARCHIC_FOUNDER_INVITE_HASH_1` y `ARCHIC_FOUNDER_INVITE_HASH_2` en Vercel.
+4. Entrega cada ruta de activación al fundador correspondiente por un canal
+   privado. Cada enlace crea una sola cuenta y queda inutilizado al ocupar su
+   plaza.
+
+La clave de servicio de Supabase solo se usa en rutas de servidor para crear
+esas dos cuentas y realizar operaciones ya autenticadas. El navegador recibe
+exclusivamente la clave pública. Las políticas RLS deniegan a cualquier usuario
+que no figure en `studio_members`, incluso si consigue registrarse directamente
+contra el proveedor de autenticación.
 
 ## Flujo de producción
 
@@ -76,9 +97,11 @@ cookies reales, la accesibilidad y la correspondencia entre textos y actividad.
 ## Arquitectura
 
 - Next.js en Vercel y Vinext/React en Cloudflare, desde la misma fuente.
-- Cloudflare D1 + Drizzle para persistencia central, con almacenamiento local aislado por origen como alternativa Vercel sin base externa.
+- Supabase Auth para sesiones seguras con cookies y dos invitaciones de fundador.
+- Supabase Postgres con RLS para una única fuente de verdad compartida.
+- Supabase Realtime privado para presencia, actividad y actualización inmediata.
 - API REST de GitHub para repositorios y versiones generadas.
-- Acceso privado gestionado por la política de Archic Studio.
+- Acceso privado comprobado en cada página y cada ruta de escritura.
 
 ## Prerequisites
 
@@ -97,72 +120,14 @@ Scripts that need writable project-scoped home, npm, XDG, and temporary paths us
 
 ## Included Shape
 
-- edit site code under `app/`
-- `app/chatgpt-auth.ts` provides optional dispatch-owned ChatGPT sign-in helpers
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+- `app/login/` contiene acceso, activación por invitación y recuperación.
+- `proxy.ts` renueva de forma segura las cookies de sesión.
+- `app/api/studio/` valida la cuenta en cada lectura y escritura.
+- `supabase/migrations/` define Postgres, RLS y autorización Realtime privada.
+- `scripts/migrate-supabase.mjs` aplica el esquema sin imprimir credenciales.
+- `scripts/create-founder-invites.mjs` genera las dos invitaciones y sus hashes.
+- `app/api/github/` publica únicamente para fundadores autenticados y vuelve a
+  auditar el proyecto antes de escribir en GitHub.
 
 ## Diagnostic Commands
 
@@ -176,6 +141,8 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm test`: build, validate, and verify the rendered development-preview metadata
 - `npm run validate:artifact`: recheck an existing artifact's manifest and ESM `default.fetch` export
 - `npm run db:generate`: generate Drizzle migrations after schema changes
+- `npm run db:migrate:supabase`: aplicar la base compartida y sus políticas RLS
+- `npm run auth:create-invites`: generar las dos rutas de activación de un solo uso
 
 Use build and validation commands for targeted diagnosis after a remote failure, not as part of the normal checkpoint path.
 
